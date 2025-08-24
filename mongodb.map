@@ -1,0 +1,8 @@
+{
+  global:
+    _mysql_plugin_interface_version_;
+    _mysql_sizeof_struct_handlerton_;
+    mongodb_plugin;
+  local:
+    *;
+};

@@ -1,0 +1,81 @@
+# Build directories
+build/
+.build/
+cmake-build-*/
+
+# Generated files
+CMakeCache.txt
+CMakeFiles/
+CPackConfig.cmake
+CPackSourceConfig.cmake
+Makefile
+cmake_install.cmake
+install_manifest.txt
+
+# Libraries and binaries
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+*.exe
+
+# Object files
+*.o
+*.obj
+
+# Source dependencies (use local copies)
+sources/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project-specific build artifacts
+ha_mongodb.so
+ha_mongodb
+test_*
+*.log
+
+# MariaDB/MySQL files
+*.frm
+*.ibd
+*.MYD
+*.MYI
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+
+# Configuration files with sensitive data
+config.local.*
+*.local
+
+# Documentation build
+docs/_build/
+docs/html/
+docs/latex/
+
+# Python virtual environments (if any)
+venv/
+env/
+.env
+
+# Node modules (if any)
+node_modules/
+
+# Logs
+*.log
+logs/
+
+# Development configuration (keep .github for CI/CD)
+.github/

@@ -25,8 +25,10 @@
 #include <mongoc/mongoc.h>
 #include <bson/bson.h>
 
+// Include forward declarations for MongoDB components
+#include "mongodb_schema.h"
+
 // Forward declarations
-class MongoSchemaRegistry;
 class MongoConnectionPool;
 class MongoQueryTranslator;
 class MongoCursorManager;
@@ -81,6 +83,8 @@ typedef struct st_mongodb_share {
 
   // Schema management
   MongoSchemaRegistry *schema_registry;
+  bool schema_inferred;
+  std::vector<MongoFieldMapping> field_mappings;
   time_t schema_last_updated;
   
   // Statistics
@@ -158,7 +162,12 @@ private:
   /*
     Data conversion methods
   */
+  // Document-to-row conversion methods (virtual column approach)
   int convert_document_to_row(const bson_t *doc, uchar *buf);
+  int convert_full_document_field(const bson_t *doc, Field *field, uint array_index);
+  int convert_simple_field_from_document(const bson_t *doc, Field *field, const char *field_name);
+  int convert_mongodb_id_field(const bson_t *doc, Field *field);
+  int convert_bson_value_to_field(bson_iter_t *iter, Field *field, MongoFieldMapping *mapping);
   int convert_row_to_document(const uchar *buf, bson_t **doc);
   
   /*

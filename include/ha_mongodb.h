@@ -142,7 +142,9 @@ class ha_mongodb final : public handler
   
   // Query state
   bson_t *pushed_condition;     // Condition pushed down to MongoDB
+  bson_t *sort_spec;           // ORDER BY specification for MongoDB
   bool position_called;         // Track if position() was called
+  ha_rows scan_position;        // Current position in table scan (for rnd_pos support)
   
   // Error handling
   int remote_error_number;
@@ -183,14 +185,14 @@ public:
   ~ha_mongodb();
 
   /*
-    Storage engine capability flags
+    Storage engine capability flags - Remove problematic flags
   */
   ulonglong table_flags() const override
   {
     return (HA_FILE_BASED | HA_REC_NOT_IN_SEQ | HA_AUTO_PART_KEY |
             HA_CAN_INDEX_BLOBS | HA_BINLOG_ROW_CAPABLE | 
             HA_BINLOG_STMT_CAPABLE | HA_PARTIAL_COLUMN_READ |
-            HA_NULL_IN_KEY | HA_NON_COMPARABLE_ROWID);
+            HA_NULL_IN_KEY | HA_STATS_RECORDS_IS_EXACT);
   }
 
   ulong index_flags(uint inx, uint part, bool all_parts) const override

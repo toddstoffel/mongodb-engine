@@ -38,48 +38,34 @@ int mongodb_parse_connection_string(const char *connection_string, MONGODB_SHARE
   
   // Parse MongoDB URI: mongodb://user:pass@host:port/database/collection?options
   std::string uri_str(connection_string);
-  fprintf(stderr, "PARSE: Starting to parse: %s\n", connection_string);
-  fflush(stderr);
   
   // Find the start of the path (after host:port)
   size_t scheme_end = uri_str.find("://");
   if (scheme_end == std::string::npos) {
-    fprintf(stderr, "PARSE: Invalid URI scheme\n");
-    fflush(stderr);
     return 1;
   }
   
   size_t path_start = uri_str.find('/', scheme_end + 3);
-  fprintf(stderr, "PARSE: path_start = %zu (should be after host:port)\n", path_start);
-  fflush(stderr);
   
   if (path_start != std::string::npos)
   {
     std::string path_part = uri_str.substr(path_start + 1);
-    fprintf(stderr, "PARSE: path_part = '%s'\n", path_part.c_str());
-    fflush(stderr);
     
     // Remove query parameters if present
     size_t query_start = path_part.find('?');
     if (query_start != std::string::npos)
     {
       path_part = path_part.substr(0, query_start);
-      fprintf(stderr, "PARSE: path_part after removing query = '%s'\n", path_part.c_str());
-      fflush(stderr);
     }
     
     // Split database/collection
     size_t collection_sep = path_part.find('/');
-    fprintf(stderr, "PARSE: collection_sep = %zu\n", collection_sep);
-    fflush(stderr);
     
     if (collection_sep != std::string::npos)
     {
       std::string database = path_part.substr(0, collection_sep);
       std::string collection = path_part.substr(collection_sep + 1);
       
-      fprintf(stderr, "PARSE: database = '%s', collection = '%s'\n", database.c_str(), collection.c_str());
-      fflush(stderr);
       
       // Allocate and store database name
       share->database_name = (char*)alloc_root(&share->mem_root, database.length() + 1);
@@ -115,17 +101,11 @@ int mongodb_parse_connection_string(const char *connection_string, MONGODB_SHARE
       if (share->mongo_connection_string)
         strcpy(share->mongo_connection_string, mongo_uri.c_str());
       
-      fprintf(stderr, "PARSED: db='%s', collection='%s', uri='%s'\n", 
-              share->database_name, share->collection_name, share->mongo_connection_string);
-      fflush(stderr);
-      
       return 0;
     }
   }
   
   // NEVER use hardcoded fallback values - parsing failure should be an error
-  fprintf(stderr, "ERROR: Failed to parse MongoDB connection string: %s\n", connection_string);
-  fflush(stderr);
   
   return 1; // Indicate parsing failure
 }

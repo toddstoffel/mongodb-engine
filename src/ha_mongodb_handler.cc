@@ -9,7 +9,6 @@
 #include "my_global.h"
 #include "field.h"
 #include "table.h"
-#include "mysqld_error.h"    // For MariaDB error constants
 // TODO: Fix complex header dependencies for Item class 
 // Forward declaration to avoid complex SQL layer includes
 class Item;
@@ -29,7 +28,6 @@ ha_mongodb::ha_mongodb(handlerton *hton, TABLE_SHARE *table_arg)
 {
   // Initialize basic state
   fprintf(stderr, "ha_mongodb::ha_mongodb() CONSTRUCTOR called, int_table_flags=0x%llx\n", int_table_flags);
-  fflush(stderr);
 }
 
 /*
@@ -47,10 +45,8 @@ int ha_mongodb::open(const char *name, int mode, uint test_if_locked)
 {
   DBUG_ENTER("ha_mongodb::open");
   
-  // DEBUG
   fprintf(stderr, "OPEN CALLED! name=%s, mode=%d, int_table_flags=0x%llx\n", 
           name ? name : "NULL", mode, int_table_flags);
-  fflush(stderr);
   
   // Get or create the shared table metadata
   if (!(share = get_share()))
@@ -62,19 +58,16 @@ int ha_mongodb::open(const char *name, int mode, uint test_if_locked)
   if (!share->parsed)
   {
     fprintf(stderr, "OPEN: Parsing connection string: %s\n", table->s->connect_string.str);
-    fflush(stderr);
     
     if (mongodb_parse_connection_string(table->s->connect_string.str, share))
     {
       fprintf(stderr, "OPEN: Connection string parsing failed\n");
-      fflush(stderr);
       free_share();
       DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
     }
     share->parsed = true;
     
     fprintf(stderr, "OPEN: Connection string parsed successfully\n");
-    fflush(stderr);
   }
   
   // Set ref_length for position-based access (match MariaDB expectation = 8 bytes)
@@ -121,21 +114,17 @@ int ha_mongodb::rnd_init(bool scan)
   }
   *row_counter_ptr = 0;
   
-  // DEBUG
   fprintf(stderr, "RND_INIT CALLED! scan=%d, table=%p, reset row counter\n", scan, table);
   fprintf(stderr, "RND_INIT: pushed_condition=%p\n", (void*)pushed_condition);
-  fflush(stderr);
   
   // Simple test - just try to connect to MongoDB
   if (!collection)
   {
     int connect_result = connect_to_mongodb();
     fprintf(stderr, "RND_INIT: connect_to_mongodb() returned: %d\n", connect_result);
-    fflush(stderr);
     if (connect_result)
     {
       fprintf(stderr, "RND_INIT: Connection failed\n");
-      fflush(stderr);
       // Error already reported by connect_to_mongodb() or stash_remote_error()
       DBUG_RETURN(connect_result);
     }
@@ -195,13 +184,11 @@ int ha_mongodb::rnd_init(bool scan)
   if (!cursor)
   {
     fprintf(stderr, "RND_INIT: Failed to create cursor\n");
-    fflush(stderr);
     DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
   }
   
   current_doc = nullptr;
   fprintf(stderr, "RND_INIT: Successfully created sorted cursor\n");
-  fflush(stderr);
   DBUG_RETURN(0);
 }
 
@@ -212,22 +199,10 @@ int ha_mongodb::rnd_next(uchar *buf)
 {
   DBUG_ENTER("ha_mongodb::rnd_next");
   
-  // ENHANCED DEBUG: Track call count
-  static int call_count = 0;
-  call_count++;
-  fprintf(stderr, "RND_NEXT CALLED! Call #%d, table=%p, buf=%p\n", call_count, table, buf);
-  fflush(stderr);
-  
   if (!cursor)
   {
-    fprintf(stderr, "RND_NEXT: No cursor - returning END_OF_FILE\n");
-    fflush(stderr);
     DBUG_RETURN(HA_ERR_END_OF_FILE);
   }
-  
-  // Fetch next document from MongoDB
-  fprintf(stderr, "RND_NEXT: Calling mongoc_cursor_next...\n");
-  fflush(stderr);
   
   if (!mongoc_cursor_next(cursor, &current_doc))
   {
@@ -236,7 +211,6 @@ int ha_mongodb::rnd_next(uchar *buf)
     if (mongoc_cursor_error(cursor, &error))
     {
       fprintf(stderr, "RND_NEXT: Cursor error: %s\n", error.message);
-      fflush(stderr);
       
       // Report MongoDB connection errors via fprintf and return proper error codes
       // Note: Using fprintf instead of my_error() to avoid complex service dependencies
@@ -259,20 +233,14 @@ int ha_mongodb::rnd_next(uchar *buf)
     }
     
     // No more documents
-    fprintf(stderr, "RND_NEXT: No more documents - returning END_OF_FILE (call #%d)\n", call_count);
-    fflush(stderr);
     DBUG_RETURN(HA_ERR_END_OF_FILE);
   }
-  
-  fprintf(stderr, "RND_NEXT: Got document #%d from MongoDB\n", call_count);
-  fflush(stderr);
   
   // Convert MongoDB document to MariaDB row
   if (!current_doc)
   {
     // Document is NULL - this shouldn't happen
     fprintf(stderr, "RND_NEXT: Current document is NULL!\n");
-    fflush(stderr);
     DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
   }
   
@@ -281,26 +249,16 @@ int ha_mongodb::rnd_next(uchar *buf)
   
   // Convert and pack fields into the record buffer
   fprintf(stderr, "RND_NEXT: Converting document to row...\n");
-  fflush(stderr);
   
   if (convert_document_to_row(current_doc, buf))
   {
     fprintf(stderr, "RND_NEXT: Document conversion failed!\n");
-    fflush(stderr);
     DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
   }
   
-  fprintf(stderr, "RND_NEXT: Successfully converted document - returning 0\n");
-  
   // Increment scan position for position tracking
   scan_position++;
-  
-  // DEBUG: Check if cursor has more documents
-  // NOTE: This is just for debugging - we can't actually call mongoc_cursor_next here
-  // because it would advance the cursor
-  fprintf(stderr, "RND_NEXT: Finished processing document #%d (scan_position now=%llu)\n", 
-          call_count, (unsigned long long)scan_position);
-  fflush(stderr);
+
   DBUG_RETURN(0);
 }
 
@@ -328,9 +286,7 @@ int ha_mongodb::info(uint flag)
 {
   DBUG_ENTER("ha_mongodb::info");
   
-  // DEBUG
   fprintf(stderr, "INFO CALLED with flag: %u\n", flag);
-  fflush(stderr);
   
   // Initialize stats to safe defaults
   stats.records = 0;
@@ -365,12 +321,10 @@ int ha_mongodb::info(uint flag)
       stats.data_file_length = stats.records * stats.mean_rec_length;
       
       fprintf(stderr, "INFO: Got document count: %lld\n", (long long)doc_count);
-      fflush(stderr);
     }
     else
     {
       fprintf(stderr, "INFO: Failed to get document count: %s\n", error.message);
-      fflush(stderr);
       // Keep defaults
     }
   }
@@ -378,7 +332,6 @@ int ha_mongodb::info(uint flag)
   {
     // Try to establish a temporary connection for statistics
     fprintf(stderr, "INFO: Attempting temporary connection for statistics\n");
-    fflush(stderr);
     
     mongoc_client_t *temp_client = mongoc_client_new(share->mongo_connection_string);
     if (temp_client)
@@ -406,7 +359,6 @@ int ha_mongodb::info(uint flag)
           stats.data_file_length = stats.records * stats.mean_rec_length;
           
           fprintf(stderr, "INFO: Got document count via temp connection: %lld\n", (long long)doc_count);
-          fflush(stderr);
         }
         
         mongoc_collection_destroy(temp_collection);
@@ -418,7 +370,6 @@ int ha_mongodb::info(uint flag)
   {
     fprintf(stderr, "INFO: No collection available for statistics (client=%p, collection=%p)\n", 
             (void*)client, (void*)collection);
-    fflush(stderr);
   }
   
   DBUG_RETURN(0);
@@ -449,9 +400,7 @@ void ha_mongodb::position(const uchar *record)
 {
   DBUG_ENTER("ha_mongodb::position");
   
-  // DEBUG
   fprintf(stderr, "POSITION CALLED! record=%p, ref_length=%u\n", record, ref_length);
-  fflush(stderr);
   
   // Use CONNECT engine approach: store simple record position/offset
   // Store the CURRENT position (scan_position is already incremented by rnd_next)
@@ -462,7 +411,6 @@ void ha_mongodb::position(const uchar *record)
   
   fprintf(stderr, "POSITION: Stored record position %llu using my_store_ptr (ref_length=%u)\n", 
           (unsigned long long)current_position, ref_length);
-  fflush(stderr);
   
   DBUG_VOID_RETURN;
 }
@@ -474,13 +422,10 @@ int ha_mongodb::rnd_pos(uchar *buf, uchar *pos)
 {
   DBUG_ENTER("ha_mongodb::rnd_pos");
   
-  // DEBUG
   fprintf(stderr, "RND_POS CALLED! buf=%p, pos=%p, ref_length=%u\n", buf, pos, ref_length);
-  fflush(stderr);
   
   if (!pos || !collection) {
     fprintf(stderr, "RND_POS: No position or collection\n");
-    fflush(stderr);
     DBUG_RETURN(HA_ERR_WRONG_COMMAND);
   }
   
@@ -488,18 +433,15 @@ int ha_mongodb::rnd_pos(uchar *buf, uchar *pos)
   my_off_t target_position = my_get_ptr(pos, ref_length);
   
   fprintf(stderr, "RND_POS: Seeking to position %llu\n", (unsigned long long)target_position);
-  fflush(stderr);
   
   // Reset cursor to beginning and seek to target position
   if (!cursor) {
     fprintf(stderr, "RND_POS: No active cursor - reinitializing\n");
-    fflush(stderr);
     
     // Reinitialize scan if no cursor exists
     int rc = rnd_init(true);
     if (rc != 0) {
       fprintf(stderr, "RND_POS: Failed to reinitialize scan\n");
-      fflush(stderr);
       DBUG_RETURN(rc);
     }
   }
@@ -508,7 +450,6 @@ int ha_mongodb::rnd_pos(uchar *buf, uchar *pos)
   if (scan_position > target_position) {
     fprintf(stderr, "RND_POS: Rewinding cursor (current=%llu, target=%llu)\n", 
             (unsigned long long)scan_position, (unsigned long long)target_position);
-    fflush(stderr);
     
     // Clean up current cursor
     if (cursor) {
@@ -523,13 +464,11 @@ int ha_mongodb::rnd_pos(uchar *buf, uchar *pos)
     
     if (!cursor) {
       fprintf(stderr, "RND_POS: Failed to create cursor for rewind\n");
-      fflush(stderr);
       DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
     }
     
     scan_position = 0;  // Reset position counter
     fprintf(stderr, "RND_POS: Created new cursor for position access\n");
-    fflush(stderr);
   }
   
   // Skip to the target position
@@ -538,7 +477,6 @@ int ha_mongodb::rnd_pos(uchar *buf, uchar *pos)
     if (!mongoc_cursor_next(cursor, &doc)) {
       fprintf(stderr, "RND_POS: Could not seek to position %llu (stopped at %llu)\n", 
               (unsigned long long)target_position, (unsigned long long)scan_position);
-      fflush(stderr);
       DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
     }
     scan_position++;
@@ -549,11 +487,9 @@ int ha_mongodb::rnd_pos(uchar *buf, uchar *pos)
   if (rc == 0) {
     fprintf(stderr, "RND_POS: Successfully retrieved document at position %llu\n", 
             (unsigned long long)target_position);
-    fflush(stderr);
   } else {
     fprintf(stderr, "RND_POS: Failed to retrieve document at position %llu (error=%d)\n", 
             (unsigned long long)target_position, rc);
-    fflush(stderr);
   }
   
   DBUG_RETURN(rc);
@@ -567,7 +503,6 @@ int ha_mongodb::index_init(uint keynr, bool sorted)
   DBUG_ENTER("ha_mongodb::index_init");
   
   fprintf(stderr, "INDEX_INIT CALLED! keynr=%u, sorted=%d\n", keynr, sorted);
-  fflush(stderr);
   
   // For ORDER BY support, initialize a sorted cursor
   if (!collection)
@@ -591,7 +526,6 @@ int ha_mongodb::index_init(uint keynr, bool sorted)
   {
     fprintf(stderr, "INDEX_INIT: MariaDB requesting sorted results (will use external sorting)\n");
   }
-  fflush(stderr);
   
   cursor = mongoc_collection_find_with_opts(collection, query, opts, nullptr);
   
@@ -601,13 +535,11 @@ int ha_mongodb::index_init(uint keynr, bool sorted)
   if (!cursor)
   {
     fprintf(stderr, "INDEX_INIT: Failed to create cursor\n");
-    fflush(stderr);
     DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
   }
   
   current_doc = nullptr;
   fprintf(stderr, "INDEX_INIT: Successfully initialized index with sorting\n");
-  fflush(stderr);
   DBUG_RETURN(0);
 }
 
@@ -616,13 +548,11 @@ int ha_mongodb::index_read_map(uchar *buf, const uchar *key, key_part_map keypar
   DBUG_ENTER("ha_mongodb::index_read_map");
   
   fprintf(stderr, "INDEX_READ_MAP CALLED - starting index scan\n");
-  fflush(stderr);
   
   // Get the first row using the cursor from index_init
   if (!cursor)
   {
     fprintf(stderr, "INDEX_READ_MAP: No cursor available\n");
-    fflush(stderr);
     DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
   }
   
@@ -633,12 +563,10 @@ int ha_mongodb::index_read_map(uchar *buf, const uchar *key, key_part_map keypar
     if (mongoc_cursor_error(cursor, &error))
     {
       fprintf(stderr, "INDEX_READ_MAP: Cursor error: %s\n", error.message);
-      fflush(stderr);
       DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
     }
     
     fprintf(stderr, "INDEX_READ_MAP: No documents found\n");
-    fflush(stderr);
     DBUG_RETURN(HA_ERR_END_OF_FILE);
   }
   
@@ -647,12 +575,10 @@ int ha_mongodb::index_read_map(uchar *buf, const uchar *key, key_part_map keypar
   if (convert_document_to_row(current_doc, buf))
   {
     fprintf(stderr, "INDEX_READ_MAP: Document conversion failed\n");
-    fflush(stderr);
     DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
   }
   
   fprintf(stderr, "INDEX_READ_MAP: Successfully returned first row\n");
-  fflush(stderr);
   DBUG_RETURN(0);
 }
 
@@ -660,15 +586,10 @@ int ha_mongodb::index_next(uchar *buf)
 {
   DBUG_ENTER("ha_mongodb::index_next");
   
-  static int call_count = 0;
-  call_count++;
-  fprintf(stderr, "INDEX_NEXT CALLED! Call #%d\n", call_count);
-  fflush(stderr);
   
   if (!cursor)
   {
     fprintf(stderr, "INDEX_NEXT: No cursor - returning END_OF_FILE\n");
-    fflush(stderr);
     DBUG_RETURN(HA_ERR_END_OF_FILE);
   }
   
@@ -679,29 +600,21 @@ int ha_mongodb::index_next(uchar *buf)
     if (mongoc_cursor_error(cursor, &error))
     {
       fprintf(stderr, "INDEX_NEXT: Cursor error: %s\n", error.message);
-      fflush(stderr);
       DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
     }
     
-    fprintf(stderr, "INDEX_NEXT: No more documents - returning END_OF_FILE (call #%d)\n", call_count);
-    fflush(stderr);
     DBUG_RETURN(HA_ERR_END_OF_FILE);
   }
   
-  fprintf(stderr, "INDEX_NEXT: Got document #%d from MongoDB\n", call_count);
-  fflush(stderr);
   
   // Convert document to row
   memset(buf, 0, table->s->reclength);
   if (convert_document_to_row(current_doc, buf))
   {
     fprintf(stderr, "INDEX_NEXT: Document conversion failed\n");
-    fflush(stderr);
     DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
   }
   
-  fprintf(stderr, "INDEX_NEXT: Successfully returned row #%d\n", call_count);
-  fflush(stderr);
   DBUG_RETURN(0);
 }
 
@@ -710,7 +623,6 @@ int ha_mongodb::index_end()
   DBUG_ENTER("ha_mongodb::index_end");
   
   fprintf(stderr, "INDEX_END CALLED - cleaning up cursor\n");
-  fflush(stderr);
   
   // Clean up cursor (same as rnd_end)
   if (cursor)
@@ -721,7 +633,6 @@ int ha_mongodb::index_end()
   current_doc = nullptr;
   
   fprintf(stderr, "INDEX_END: Cursor cleaned up\n");
-  fflush(stderr);
   DBUG_RETURN(0);
 }
 
@@ -800,9 +711,7 @@ ha_rows ha_mongodb::records_in_range(uint inx, const key_range *min_key, const k
 {
   DBUG_ENTER("ha_mongodb::records_in_range");
   
-  // DEBUG
   fprintf(stderr, "RECORDS_IN_RANGE CALLED for index %u\n", inx);
-  fflush(stderr);
   
   // If no keys specified (full table scan), return total count
   if (!min_key && !max_key && client && collection)
@@ -825,20 +734,17 @@ ha_rows ha_mongodb::records_in_range(uint inx, const key_range *min_key, const k
     if (doc_count >= 0)
     {
       fprintf(stderr, "RECORDS_IN_RANGE: Got document count: %lld\n", (long long)doc_count);
-      fflush(stderr);
       DBUG_RETURN((ha_rows)doc_count);
     }
     else
     {
       fprintf(stderr, "RECORDS_IN_RANGE: Failed to get document count: %s\n", error.message);
-      fflush(stderr);
     }
   }
   
   // For range queries or when connection not available, return estimate
   fprintf(stderr, "RECORDS_IN_RANGE: Returning estimate (client=%p, collection=%p)\n", 
           (void*)client, (void*)collection);
-  fflush(stderr);
   DBUG_RETURN(100); // Conservative estimate
 }
 
@@ -851,18 +757,15 @@ const COND *ha_mongodb::cond_push(const COND *cond)
   
   if (!cond) {
     fprintf(stderr, "COND_PUSH: No condition received\n");
-    fflush(stderr);
     DBUG_RETURN(nullptr);
   }
 
   fprintf(stderr, "COND_PUSH: Received condition (pointer: %p)\n", (void*)cond);
-  fflush(stderr);
 
   // Create BSON document for MongoDB filter
   bson_t *match_filter = bson_new();
   if (!match_filter) {
     fprintf(stderr, "COND_PUSH: Failed to create BSON document\n");
-    fflush(stderr);
     DBUG_RETURN(cond);
   }
 
@@ -874,7 +777,6 @@ const COND *ha_mongodb::cond_push(const COND *cond)
     }
     pushed_condition = match_filter;
     
-    // DEBUG: Show the generated filter
     if (pushed_condition) {
       char *filter_str = bson_as_canonical_extended_json(pushed_condition, nullptr);
       if (filter_str) {
@@ -882,7 +784,6 @@ const COND *ha_mongodb::cond_push(const COND *cond)
         bson_free(filter_str);
       }
     }
-    fflush(stderr);
     
     // Return nullptr to indicate we can handle this condition
     DBUG_RETURN(nullptr);
@@ -890,7 +791,6 @@ const COND *ha_mongodb::cond_push(const COND *cond)
     // Translation failed - cleanup and let MariaDB handle filtering
     bson_destroy(match_filter);
     fprintf(stderr, "COND_PUSH: Translation failed - returning condition for MariaDB filtering\n");
-    fflush(stderr);
     DBUG_RETURN(cond);
   }
 }
@@ -902,7 +802,6 @@ void ha_mongodb::cond_pop()
   // Clean up any pushed condition
   if (pushed_condition) {
     fprintf(stderr, "COND_POP: Cleaning up pushed condition\n");
-    fflush(stderr);
     bson_destroy(pushed_condition);
     pushed_condition = nullptr;
   }
@@ -969,7 +868,6 @@ MONGODB_SHARE *ha_mongodb::get_share()
       share->parsed = false;
       
       fprintf(stderr, "GET_SHARE: Created new share with initialized mem_root\n");
-      fflush(stderr);
     }
   }
   else
@@ -992,7 +890,6 @@ int ha_mongodb::free_share()
     share = nullptr;
     
     fprintf(stderr, "FREE_SHARE: Cleaned up share and mem_root\n");
-    fflush(stderr);
   }
   
   DBUG_RETURN(0);
@@ -1012,7 +909,6 @@ int ha_mongodb::parse_connection_string(const char *connection_string)
   {
     // Connection string parsing FAILED - this is a fatal error
     fprintf(stderr, "ERROR: Failed to parse connection string: %s\n", connection_string);
-    fflush(stderr);
     DBUG_RETURN(1); // Return failure, no fallbacks
   }
   
@@ -1022,7 +918,6 @@ int ha_mongodb::parse_connection_string(const char *connection_string)
   fprintf(stderr, "SUCCESS: Using parsed connection values - db='%s', collection='%s'\n", 
           share->database_name ? share->database_name : "NULL",
           share->collection_name ? share->collection_name : "NULL");
-  fflush(stderr);
   
   DBUG_RETURN(0);
 }
@@ -1046,12 +941,10 @@ int ha_mongodb::connect_to_mongodb()
       fprintf(stderr, "CONNECT: collection_name='%s'\n", share->collection_name);
     }
   }
-  fflush(stderr);
   
   if (!share || !share->mongo_connection_string || !share->database_name || !share->collection_name)
   {
     fprintf(stderr, "CONNECT: Missing required fields, returning 1\n");
-    fflush(stderr);
     DBUG_RETURN(1);
   }
   
@@ -1147,14 +1040,12 @@ int ha_mongodb::convert_document_to_row(const bson_t *doc, uchar *buf)
   
   // Strategy: Store only the document field as JSON
   
-  // DEBUG: Print all fields and their indices
   fprintf(stderr, "DEBUG: Table has %u fields:\n", table->s->fields);
   for (uint i = 0; i < table->s->fields; i++) {
     Field *f = table->field[i];
     fprintf(stderr, "  Field[%u]: name='%s', field_index=%u, null_bit=%u\n", 
             i, f->field_name.str, f->field_index, f->null_bit);
   }
-  fflush(stderr);
   
   uint field_array_index = 0;
   for (field_ptr = table->field; *field_ptr; field_ptr++, field_array_index++)
@@ -1162,16 +1053,13 @@ int ha_mongodb::convert_document_to_row(const bson_t *doc, uchar *buf)
     Field *field = *field_ptr;
     const char *field_name = field->field_name.str;
     
-    // DEBUG: Print field processing with array index
     fprintf(stderr, "DEBUG: Processing field_name='%s' (length=%lu) at array_index=%u\n", 
             field_name ? field_name : "NULL", field_name ? strlen(field_name) : 0, field_array_index);
-    fflush(stderr);
     
     if (strcmp(field_name, "_id") == 0)
     {
       // Handle _id field - extract ObjectId and convert to string
       fprintf(stderr, "DEBUG: Matched _id field at array_index=%u\n", field_array_index);
-      fflush(stderr);
       
       field->ptr = buf + field->offset(table->record[0]);
       convert_mongodb_id_field(doc, field);
@@ -1180,20 +1068,17 @@ int ha_mongodb::convert_document_to_row(const bson_t *doc, uchar *buf)
     {
       // Handle document field - convert full BSON to JSON and pack into buffer
       fprintf(stderr, "DEBUG: Matched document field at array_index=%u - converting to JSON\n", field_array_index);
-      fflush(stderr);
       
       // Convert BSON to JSON string using relaxed format (more readable)
       char *json_str = bson_as_relaxed_extended_json(doc, nullptr);
       if (!json_str) {
         fprintf(stderr, "DEBUG: relaxed JSON failed, trying canonical\n");
-        fflush(stderr);
         // Fallback to canonical format
         json_str = bson_as_canonical_extended_json(doc, nullptr);
       }
       
       if (json_str) {
         fprintf(stderr, "DEBUG: Successfully converted to JSON: %.200s...\n", json_str);
-        fflush(stderr);
         
         // CRITICAL: Set field pointer to point to the row buffer location for this field
         field->ptr = buf + field->offset(table->record[0]);
@@ -1205,12 +1090,10 @@ int ha_mongodb::convert_document_to_row(const bson_t *doc, uchar *buf)
         
         fprintf(stderr, "DEBUG: JSON stored in field and packed into buffer at offset %lu\n", 
                 (unsigned long)field->offset(table->record[0]));
-        fflush(stderr);
         
         bson_free(json_str);
       } else {
         fprintf(stderr, "DEBUG: JSON conversion failed\n");
-        fflush(stderr);
         // Store error message
         field->ptr = buf + field->offset(table->record[0]);
         field->set_notnull();
@@ -1222,7 +1105,6 @@ int ha_mongodb::convert_document_to_row(const bson_t *doc, uchar *buf)
     {
       // For any other field, extract from document
       fprintf(stderr, "DEBUG: Extracting field='%s' from document\n", field_name);
-      fflush(stderr);
       
       // Set field pointer to row buffer location
       field->ptr = buf + field->offset(table->record[0]);
@@ -1243,31 +1125,26 @@ int ha_mongodb::convert_full_document_field(const bson_t *doc, Field *field, uin
   
   // EXPLICIT DEBUG
   fprintf(stderr, "CONVERT_FULL_DOCUMENT_FIELD CALLED!\n");
-  fflush(stderr);
   
   if (!doc || !field) {
     fprintf(stderr, "CONVERT_FULL_DOCUMENT_FIELD: NULL doc or field!\n");
-    fflush(stderr);
     DBUG_RETURN(1);
   }
   
   // Debug field information
   fprintf(stderr, "Field name: %s, field_index: %u, array_index: %u, null_bit: %u\n", 
           field->field_name.str, field->field_index, array_index, field->null_bit);
-  fflush(stderr);
   
   // Convert BSON to JSON string using relaxed format (more readable)
   char *json_str = bson_as_relaxed_extended_json(doc, nullptr);
   if (!json_str) {
     fprintf(stderr, "CONVERT_FULL_DOCUMENT_FIELD: relaxed JSON failed, trying canonical\n");
-    fflush(stderr);
     // Fallback to canonical format
     json_str = bson_as_canonical_extended_json(doc, nullptr);
   }
   
   if (json_str) {
     fprintf(stderr, "CONVERT_FULL_DOCUMENT_FIELD: Successfully converted to JSON: %.200s...\n", json_str);
-    fflush(stderr);
     
     // Clear any existing null flag and set the field
     field->set_notnull();
@@ -1277,19 +1154,16 @@ int ha_mongodb::convert_full_document_field(const bson_t *doc, Field *field, uin
     int store_result = field->store(json_str, strlen(json_str), field_charset);
     
     fprintf(stderr, "Store result: %d, field->is_null(): %d\n", store_result, field->is_null());
-    fflush(stderr);
     
     bson_free(json_str);
     
     fprintf(stderr, "CONVERT_FULL_DOCUMENT_FIELD: JSON conversion complete using array_index=%u\n", array_index);
-    fflush(stderr);
     
     DBUG_RETURN(0);
   }
   
   // Fallback: store error message if JSON conversion fails
   fprintf(stderr, "CONVERT_FULL_DOCUMENT_FIELD: JSON conversion failed, storing error\n");
-  fflush(stderr);
   field->set_notnull();
   CHARSET_INFO *field_charset = field->charset();
   field->store("{\"error\":\"Failed to convert BSON to JSON\"}", 37, field_charset);
@@ -1303,26 +1177,20 @@ int ha_mongodb::convert_simple_field_from_document(const bson_t *doc, Field *fie
 {
   DBUG_ENTER("ha_mongodb::convert_simple_field_from_document");
   
-  // DEBUG
   fprintf(stderr, "CONVERT_SIMPLE_FIELD CALLED for field: %s\n", field_name ? field_name : "NULL");
-  fflush(stderr);
   
   bson_iter_t iter;
   
   // Try to find field in document
   if (!bson_iter_init(&iter, doc) || !bson_iter_find(&iter, field_name))
   {
-    // DEBUG
     fprintf(stderr, "FIELD NOT FOUND: %s - leaving as NULL\n", field_name ? field_name : "NULL");
-    fflush(stderr);
     
     // Field not found - stays NULL (already set in convert_document_to_row)
     DBUG_RETURN(0);
   }
   
-  // DEBUG
   fprintf(stderr, "FIELD FOUND: %s, type=%d\n", field_name ? field_name : "NULL", bson_iter_type(&iter));
-  fflush(stderr);
   
   // Extract value based on BSON type
   field->set_notnull();
@@ -1333,7 +1201,6 @@ int ha_mongodb::convert_simple_field_from_document(const bson_t *doc, Field *fie
     {
       int32_t value = bson_iter_int32(&iter);
       fprintf(stderr, "STORING INT32: %d for field %s\n", value, field_name);
-      fflush(stderr);
       field->store(value);
       break;
     }
@@ -1341,7 +1208,6 @@ int ha_mongodb::convert_simple_field_from_document(const bson_t *doc, Field *fie
     {
       int64_t value = bson_iter_int64(&iter);
       fprintf(stderr, "STORING INT64: %lld for field %s\n", (long long)value, field_name);
-      fflush(stderr);
       field->store(value);
       break;
     }
@@ -1349,7 +1215,6 @@ int ha_mongodb::convert_simple_field_from_document(const bson_t *doc, Field *fie
     {
       double value = bson_iter_double(&iter);
       fprintf(stderr, "STORING DOUBLE: %f for field %s\n", value, field_name);
-      fflush(stderr);
       field->store(value);
       break;
     }
@@ -1358,7 +1223,6 @@ int ha_mongodb::convert_simple_field_from_document(const bson_t *doc, Field *fie
       uint32_t len;
       const char* value = bson_iter_utf8(&iter, &len);
       fprintf(stderr, "STORING UTF8: '%.*s' for field %s\n", (int)len, value, field_name);
-      fflush(stderr);
       
       // Use the field's charset instead of hardcoding
       CHARSET_INFO *field_charset = field->charset();
@@ -1369,7 +1233,6 @@ int ha_mongodb::convert_simple_field_from_document(const bson_t *doc, Field *fie
     {
       // For other types, store a descriptive string
       fprintf(stderr, "STORING UNSUPPORTED TYPE: %d for field %s\n", bson_iter_type(&iter), field_name);
-      fflush(stderr);
       
       char type_desc[64];
       snprintf(type_desc, sizeof(type_desc), "[BSON_TYPE_%d]", bson_iter_type(&iter));
@@ -1391,9 +1254,7 @@ int ha_mongodb::convert_mongodb_id_field(const bson_t *doc, Field *field)
 {
   DBUG_ENTER("ha_mongodb::convert_mongodb_id_field");
   
-  // DEBUG - prove this function is called
   fprintf(stderr, "CONVERT_ID_FIELD CALLED!\n");
-  fflush(stderr);
   
   bson_iter_t iter;
   if (!bson_iter_init(&iter, doc) || !bson_iter_find(&iter, "_id"))
@@ -1405,9 +1266,7 @@ int ha_mongodb::convert_mongodb_id_field(const bson_t *doc, Field *field)
   
   if (BSON_ITER_HOLDS_OID(&iter))
   {
-    // DEBUG: This should definitely show up since _id is working
     fprintf(stderr, "PROCESSING OBJECTID for _id field\n");
-    fflush(stderr);
     
     // ObjectId - convert to string
     const bson_oid_t *oid = bson_iter_oid(&iter);

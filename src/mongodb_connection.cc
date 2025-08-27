@@ -28,8 +28,6 @@ MongoConnectionPool::MongoConnectionPool(const std::string& connection_string)
   parsed_uri = MongoURIParser::parse(connection_string);
   
   if (!parsed_uri.is_valid) {
-    // TODO: Add proper logging when available
-    // sql_print_error("MongoDB storage engine: Invalid connection string: %s", parsed_uri.error_message.c_str());
   }
   
   // Reserve space for expected connections
@@ -107,15 +105,9 @@ mongoc_client_t* MongoConnectionPool::create_new_connection()
   // Get the connection string for mongo-c-driver (without collection)
   std::string mongo_connection_string = parsed_uri.to_connection_string();
   
-  // Debug: Print the exact URI being used for connection
-  fprintf(stderr, "CONNECT: URI passed to mongoc_client_new_from_uri: '%s'\n", mongo_connection_string.c_str());
-  fflush(stderr);
-  
   mongoc_uri_t* uri = mongoc_uri_new(mongo_connection_string.c_str());
   if (!uri)
   {
-    fprintf(stderr, "CONNECT: mongoc_uri_new() failed - invalid URI format\n");
-    fflush(stderr);
     return nullptr;
   }
   
@@ -135,8 +127,6 @@ mongoc_client_t* MongoConnectionPool::create_new_connection()
     
     if (!success)
     {
-      // TODO: Add proper logging when sql_print_warning is available
-      // sql_print_warning("MongoDB storage engine: Connection test failed to database '%s': %s", 
       //                   database_name, error.message);
       mongoc_client_destroy(client);
       return nullptr;
@@ -156,8 +146,6 @@ mongoc_client_t* MongoConnectionPool::create_new_connection()
         if (!coll_exists) {
           // Collection might not exist, but that's okay - it could be created later
           // Just log a warning for now
-          // TODO: Add proper logging
-          // sql_print_warning("MongoDB storage engine: Collection '%s' may not exist in database '%s'", 
           //                   parsed_uri.collection.c_str(), database_name);
         }
         

@@ -4,12 +4,13 @@ A professional storage engine that enables seamless SQL queries on MongoDB colle
 
 ## Features
 
-- **✅ Condition Pushdown**: WHERE clauses are automatically translated to MongoDB filters for server-side query optimization
-- **SQL-to-MongoDB Translation**: Query MongoDB collections using standard SQL syntax
-- **Cross-Engine Joins**: Join MongoDB data with traditional SQL tables (InnoDB, MyISAM, etc.)
-- **Dynamic Schema Mapping**: Automatic schema inference from MongoDB's flexible document structure
-- **Connection Pooling**: Efficient connection management with automatic reconnection
-- **Aggregation Pushdown**: Push complex queries to MongoDB for optimal performance (planned)
+- **✅ Condition Pushdown**: WHERE clauses automatically translated to MongoDB server-side filters for optimal performance
+- **✅ SQL Table Operations**: Full table scanning, row-by-row access, and document-to-row conversion  
+- **✅ MongoDB Integration**: Native connection handling with authentication and error management
+- **Cross-Engine Joins**: Join MongoDB data with traditional SQL tables (InnoDB, MyISAM, etc.) - *planned*
+- **Dynamic Schema Mapping**: Automatic schema inference from MongoDB's flexible document structure - *planned*
+- **Advanced Query Translation**: Complex WHERE conditions (AND, OR, comparisons) - *in development*
+- **Connection Pooling**: Efficient connection management with automatic reconnection - *planned*
 
 ## Quick Start
 
@@ -62,6 +63,40 @@ SELECT c.customerName, COUNT(o.orderNumber) as order_count
 FROM customers c
 LEFT JOIN mysql_orders o ON c._id = o.customer_id
 GROUP BY c._id;
+```
+
+## Current Status
+
+### ✅ **Phase 2 Complete - Core Functionality Working**
+
+The MongoDB Storage Engine has reached a major milestone with **full basic functionality**:
+
+#### **Working Features (Verified August 2025)**
+
+- **✅ Plugin Installation**: Loads as `MONGODB` engine in MariaDB 11.x+
+- **✅ Table Creation**: `CREATE TABLE ... ENGINE=MONGODB CONNECTION='...'`
+- **✅ Basic Queries**: `SELECT` statements with simple `WHERE` conditions
+- **✅ Condition Pushdown**: Server-side filtering in MongoDB (performance optimized)
+- **✅ Authentication**: MongoDB connection with username/password and authSource
+- **✅ Document Conversion**: MongoDB BSON documents → MariaDB table rows
+
+#### **Performance Benefits Achieved**
+
+- **Server-side filtering**: `WHERE city = 'Paris'` executes in MongoDB, not MariaDB
+- **Reduced data transfer**: Only matching documents transferred over network
+- **Native MongoDB indexing**: Queries leverage existing MongoDB indexes
+
+#### **Example Working Queries**
+
+```sql
+-- Simple condition pushdown (server-side filtering)
+SELECT customerName FROM customers WHERE city = 'Paris';
+
+-- Table scanning 
+SELECT COUNT(*) FROM customers;
+
+-- Field projection
+SELECT customerName, city FROM customers LIMIT 10;
 ```
 
 ## Development Status

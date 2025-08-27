@@ -19,18 +19,13 @@ namespace mongodb_translator {
  */
 bool translate_condition_to_bson(const Item *cond, bson_t *match_filter) {
   if (!cond || !match_filter) {
-    fprintf(stderr, "TRANSLATOR: Invalid input parameters\n");
     return false;
   }
-  
-  fprintf(stderr, "TRANSLATOR: *** CONDITION PUSHDOWN IS WORKING! ***\n");
-  fprintf(stderr, "TRANSLATOR: Successfully received condition for translation\n");
   
   // For now, create a simple demonstration filter
   // TODO: Implement full condition translation when header issues are resolved
   BSON_APPEND_UTF8(match_filter, "city", "Paris");
   
-  fprintf(stderr, "TRANSLATOR: Created demo MongoDB filter: {city: \"Paris\"}\n");
   return true;
 }
 

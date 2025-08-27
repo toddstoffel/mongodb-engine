@@ -9,17 +9,27 @@
 #include "my_global.h"
 #include "field.h"
 #include "table.h"
+#include "mysqld_error.h"    // For MariaDB error constants
+// TODO: Fix complex header dependencies for Item class 
+// Forward declaration to avoid complex SQL layer includes
+class Item;
+typedef Item COND;  // COND is typedef for Item in MariaDB
 #include "ha_mongodb.h"
 #include "mongodb_connection.h"
 #include "mongodb_schema.h"
+#include "mongodb_translator.h"
 
 /* 
    Constructor - Initialize a new handler instance
 */
 ha_mongodb::ha_mongodb(handlerton *hton, TABLE_SHARE *table_arg)
-  : handler(hton, table_arg), share(nullptr), cursor(nullptr), scan_position(0)
+  : handler(hton, table_arg), 
+    int_table_flags(HA_CAN_INDEX_BLOBS | HA_CAN_TABLE_CONDITION_PUSHDOWN | HA_TABLE_SCAN_ON_INDEX),
+    share(nullptr), cursor(nullptr), scan_position(0)
 {
   // Initialize basic state
+  fprintf(stderr, "ha_mongodb::ha_mongodb() CONSTRUCTOR called, int_table_flags=0x%llx\n", int_table_flags);
+  fflush(stderr);
 }
 
 /*
@@ -38,7 +48,8 @@ int ha_mongodb::open(const char *name, int mode, uint test_if_locked)
   DBUG_ENTER("ha_mongodb::open");
   
   // DEBUG
-  fprintf(stderr, "OPEN CALLED! name=%s, mode=%d\n", name ? name : "NULL", mode);
+  fprintf(stderr, "OPEN CALLED! name=%s, mode=%d, int_table_flags=0x%llx\n", 
+          name ? name : "NULL", mode, int_table_flags);
   fflush(stderr);
   
   // Get or create the shared table metadata
@@ -112,6 +123,7 @@ int ha_mongodb::rnd_init(bool scan)
   
   // DEBUG
   fprintf(stderr, "RND_INIT CALLED! scan=%d, table=%p, reset row counter\n", scan, table);
+  fprintf(stderr, "RND_INIT: pushed_condition=%p\n", (void*)pushed_condition);
   fflush(stderr);
   
   // Simple test - just try to connect to MongoDB
@@ -122,9 +134,10 @@ int ha_mongodb::rnd_init(bool scan)
     fflush(stderr);
     if (connect_result)
     {
-      fprintf(stderr, "RND_INIT: Connection failed, returning HA_ERR_INTERNAL_ERROR (%d)\n", HA_ERR_INTERNAL_ERROR);
+      fprintf(stderr, "RND_INIT: Connection failed\n");
       fflush(stderr);
-      DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+      // Error already reported by connect_to_mongodb() or stash_remote_error()
+      DBUG_RETURN(connect_result);
     }
   }
   
@@ -158,16 +171,25 @@ int ha_mongodb::rnd_init(bool scan)
     fprintf(stderr, "RND_INIT: MongoDB sorting not yet implemented - falling back to MariaDB sorting\n");
     
     // For now, fall back to simple cursor
-    bson_t *query = bson_new();  // Empty query = scan all documents
+    bson_t *query = pushed_condition ? bson_copy(pushed_condition) : bson_new();
     cursor = mongoc_collection_find_with_opts(collection, query, nullptr, nullptr);
     bson_destroy(query);
-    fprintf(stderr, "RND_INIT: Created simple cursor - MariaDB will handle sorting\n");
+    fprintf(stderr, "RND_INIT: Created cursor with condition filter\n");
   } else {
-    // Original approach: let MariaDB handle sorting
-    bson_t *query = bson_new();  // Empty query = scan all documents
+    // Use pushed condition if available, otherwise scan all documents
+    bson_t *query = pushed_condition ? bson_copy(pushed_condition) : bson_new();
     cursor = mongoc_collection_find_with_opts(collection, query, nullptr, nullptr);
     bson_destroy(query);
-    fprintf(stderr, "RND_INIT: Created simple cursor - MariaDB will handle sorting\n");
+    
+    if (pushed_condition) {
+      char* filter_str = bson_as_canonical_extended_json(pushed_condition, nullptr);
+      if (filter_str) {
+        fprintf(stderr, "RND_INIT: Created cursor with pushed condition: %s\n", filter_str);
+        bson_free(filter_str);
+      }
+    } else {
+      fprintf(stderr, "RND_INIT: Created simple cursor - no condition pushed\n");
+    }
   }
   
   if (!cursor)
@@ -215,8 +237,25 @@ int ha_mongodb::rnd_next(uchar *buf)
     {
       fprintf(stderr, "RND_NEXT: Cursor error: %s\n", error.message);
       fflush(stderr);
-      stash_remote_error();
-      DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+      
+      // Report MongoDB connection errors via fprintf and return proper error codes
+      // Note: Using fprintf instead of my_error() to avoid complex service dependencies
+      if (strstr(error.message, "connection refused") || 
+          strstr(error.message, "No suitable servers found")) {
+        fprintf(stderr, "MONGODB ERROR: Connection failed - %s\n", error.message);
+        DBUG_RETURN(HA_ERR_NO_CONNECTION);
+      } else if (strstr(error.message, "Authentication failed") ||
+                 strstr(error.message, "not authorized")) {
+        fprintf(stderr, "MONGODB ERROR: Authentication failed - %s\n", error.message);
+        DBUG_RETURN(HA_ERR_NO_CONNECTION);
+      } else if (strstr(error.message, "Collection") && strstr(error.message, "not found")) {
+        fprintf(stderr, "MONGODB ERROR: Collection not found - %s\n", error.message);
+        DBUG_RETURN(HA_ERR_NO_SUCH_TABLE);
+      } else {
+        // Generic MongoDB error
+        fprintf(stderr, "MONGODB ERROR: %s (code: %d)\n", error.message, error.code);
+        DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+      }
     }
     
     // No more documents
@@ -335,13 +374,13 @@ int ha_mongodb::info(uint flag)
       // Keep defaults
     }
   }
-  else if (share && share->connection_string)
+  else if (share && share->mongo_connection_string)
   {
     // Try to establish a temporary connection for statistics
     fprintf(stderr, "INFO: Attempting temporary connection for statistics\n");
     fflush(stderr);
     
-    mongoc_client_t *temp_client = mongoc_client_new(share->connection_string);
+    mongoc_client_t *temp_client = mongoc_client_new(share->mongo_connection_string);
     if (temp_client)
     {
       mongoc_collection_t *temp_collection = mongoc_client_get_collection(
@@ -708,20 +747,31 @@ int ha_mongodb::delete_row(const uchar *buf)
 }
 
 /*
-   Statistics and metadata - stub implementations
+   Statistics and metadata - implement reasonable defaults for optimizer
 */
 ha_rows ha_mongodb::estimate_rows_upper_bound()
 {
   DBUG_ENTER("ha_mongodb::estimate_rows_upper_bound");
-  DBUG_RETURN(HA_POS_ERROR);
+  // Return a reasonable estimate instead of error
+  // Use the stats.records if available, otherwise default to 1000
+  if (stats.records > 0) {
+    DBUG_RETURN(stats.records);
+  }
+  DBUG_RETURN(1000); // Reasonable default for MongoDB collections
 }
 
 IO_AND_CPU_COST ha_mongodb::scan_time()
 {
   DBUG_ENTER("ha_mongodb::scan_time");
   IO_AND_CPU_COST cost;
-  cost.io = 0.0;
-  cost.cpu = 0.0;
+  
+  // Provide reasonable cost estimates for MongoDB table scans
+  // Base cost on estimated record count
+  ha_rows records = (stats.records > 0) ? stats.records : 1000;
+  
+  cost.io = (double)records * 0.1;   // Assume 0.1 IO cost per record
+  cost.cpu = (double)records * 0.05; // Assume 0.05 CPU cost per record
+  
   DBUG_RETURN(cost);
 }
 
@@ -738,8 +788,11 @@ IO_AND_CPU_COST ha_mongodb::rnd_pos_time(ha_rows rows)
 {
   DBUG_ENTER("ha_mongodb::rnd_pos_time");
   IO_AND_CPU_COST cost;
-  cost.io = 0.0;
-  cost.cpu = 0.0;
+  
+  // Cost for random position access (by _id)
+  cost.io = (double)rows * 0.2;   // Higher cost for random access
+  cost.cpu = (double)rows * 0.1;  // CPU cost for position lookups
+  
   DBUG_RETURN(cost);
 }
 
@@ -792,38 +845,68 @@ ha_rows ha_mongodb::records_in_range(uint inx, const key_range *min_key, const k
 /*
    Condition pushdown - stub implementations
 */
-const Item *ha_mongodb::cond_push(const Item *cond)
+const COND *ha_mongodb::cond_push(const COND *cond)
 {
   DBUG_ENTER("ha_mongodb::cond_push");
   
-  if (cond)
-  {
-    fprintf(stderr, "COND_PUSH: Received condition (pointer: %p)\n", (void*)cond);
-    fflush(stderr);
-    
-    // For now, just store that we received a condition
-    // TODO: Implement actual condition translation to MongoDB BSON
-    // This would involve parsing the Item tree and converting to MongoDB query
-    
-    // For Phase 2, we'll return the condition to indicate we can't handle it yet
-    // This means MariaDB will do the filtering after we return all rows
-    fprintf(stderr, "COND_PUSH: Returning condition - not translated yet (Phase 2 TODO)\n");
-    fflush(stderr);
-  }
-  else
-  {
+  if (!cond) {
     fprintf(stderr, "COND_PUSH: No condition received\n");
     fflush(stderr);
+    DBUG_RETURN(nullptr);
   }
-  
-  // Return the condition to indicate we can't handle it yet
-  // When we implement translation, we'll return nullptr for conditions we can handle
-  DBUG_RETURN(cond);
+
+  fprintf(stderr, "COND_PUSH: Received condition (pointer: %p)\n", (void*)cond);
+  fflush(stderr);
+
+  // Create BSON document for MongoDB filter
+  bson_t *match_filter = bson_new();
+  if (!match_filter) {
+    fprintf(stderr, "COND_PUSH: Failed to create BSON document\n");
+    fflush(stderr);
+    DBUG_RETURN(cond);
+  }
+
+  // Translate the condition to MongoDB BSON filter
+  if (mongodb_translator::translate_condition_to_bson(cond, match_filter)) {
+    // Translation successful - store the filter for use in rnd_init/index_init
+    if (pushed_condition) {
+      bson_destroy(pushed_condition);
+    }
+    pushed_condition = match_filter;
+    
+    // DEBUG: Show the generated filter
+    if (pushed_condition) {
+      char *filter_str = bson_as_canonical_extended_json(pushed_condition, nullptr);
+      if (filter_str) {
+        fprintf(stderr, "COND_PUSH: Successfully translated condition to MongoDB filter: %s\n", filter_str);
+        bson_free(filter_str);
+      }
+    }
+    fflush(stderr);
+    
+    // Return nullptr to indicate we can handle this condition
+    DBUG_RETURN(nullptr);
+  } else {
+    // Translation failed - cleanup and let MariaDB handle filtering
+    bson_destroy(match_filter);
+    fprintf(stderr, "COND_PUSH: Translation failed - returning condition for MariaDB filtering\n");
+    fflush(stderr);
+    DBUG_RETURN(cond);
+  }
 }
 
 void ha_mongodb::cond_pop()
 {
   DBUG_ENTER("ha_mongodb::cond_pop");
+  
+  // Clean up any pushed condition
+  if (pushed_condition) {
+    fprintf(stderr, "COND_POP: Cleaning up pushed condition\n");
+    fflush(stderr);
+    bson_destroy(pushed_condition);
+    pushed_condition = nullptr;
+  }
+  
   DBUG_VOID_RETURN;
 }
 
@@ -1031,8 +1114,11 @@ int ha_mongodb::stash_remote_error()
 {
   DBUG_ENTER("ha_mongodb::stash_remote_error");
   
-  // For Phase 1, just set a generic error
-  remote_error_number = HA_ERR_INTERNAL_ERROR;
+  // Report a generic MongoDB connection error via fprintf
+  // Note: Using fprintf instead of my_error() to avoid service dependencies
+  fprintf(stderr, "MONGODB ERROR: Connection failed - check connection string and server availability\n");
+  
+  remote_error_number = HA_ERR_NO_CONNECTION;
   strcpy(remote_error_buf, "MongoDB operation failed");
   
   DBUG_RETURN(remote_error_number);

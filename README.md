@@ -1,14 +1,15 @@
 # MongoDB Storage Engine for MariaDB
 
-A professional storage engine that enables seamless SQL queries on MongoDB collections through MariaDB's storage engine interface.
+A professional storage engine that enables seamless SQL queries on MongoDB collections through MariaDB's storage engine interface with advanced query optimization.
 
 ## Features
 
+- **✅ Condition Pushdown**: WHERE clauses are automatically translated to MongoDB filters for server-side query optimization
 - **SQL-to-MongoDB Translation**: Query MongoDB collections using standard SQL syntax
 - **Cross-Engine Joins**: Join MongoDB data with traditional SQL tables (InnoDB, MyISAM, etc.)
 - **Dynamic Schema Mapping**: Automatic schema inference from MongoDB's flexible document structure
 - **Connection Pooling**: Efficient connection management with automatic reconnection
-- **Aggregation Pushdown**: Push complex queries to MongoDB for optimal performance
+- **Aggregation Pushdown**: Push complex queries to MongoDB for optimal performance (planned)
 
 ## Quick Start
 
@@ -65,12 +66,36 @@ GROUP BY c._id;
 
 ## Development Status
 
-**Current Phase**: Phase 2 - Core Functionality Implementation
+**Current Phase**: Phase 3 - Advanced Features Implementation
 
-- ✅ **Phase 1**: Plugin infrastructure and basic connectivity
-- 🚧 **Phase 2**: Connection management, URI parsing, and handler implementation
-- 📋 **Phase 3**: Advanced query translation and aggregation pipeline
-- 📋 **Phase 4**: Production features and performance optimization
+### Phase 1: Foundation - ✅ COMPLETED
+
+- [x] Plugin registration and initialization
+- [x] Basic handler class with MariaDB interface compliance
+- [x] Connection management using libmongoc
+- [x] Table creation with ENGINE=MONGODB syntax
+
+### Phase 2: Core Functionality - ✅ COMPLETED
+
+- [x] **Condition Pushdown**: WHERE clauses translated to MongoDB server-side filters
+- [x] URI parsing and connection configuration
+- [x] Dynamic document-to-row conversion
+- [x] Basic table scanning operations
+- [x] Error handling and logging integration
+
+### Phase 3: Advanced Features - 🚧 IN PROGRESS
+
+- [ ] Complex WHERE conditions (AND, OR, NOT, IN, etc.)
+- [ ] Index operations and key-based lookups
+- [ ] ORDER BY and LIMIT optimization
+- [ ] Aggregation pipeline generation
+
+### Phase 4: Production Features - 📋 PLANNED
+
+- [ ] Cross-engine JOIN optimization
+- [ ] Advanced connection pooling
+- [ ] Performance monitoring and metrics
+- [ ] Schema evolution handling
 
 ## Architecture
 

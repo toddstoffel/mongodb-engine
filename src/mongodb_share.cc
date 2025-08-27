@@ -93,9 +93,21 @@ int mongodb_parse_connection_string(const char *connection_string, MONGODB_SHARE
         
       // Create proper MongoDB URI without the collection part
       std::string mongo_uri = uri_str.substr(0, path_start + 1) + database;
-      if (query_start != std::string::npos)
-      {
-        mongo_uri += "?" + uri_str.substr(uri_str.find('?') + 1);
+      
+      // Add authSource=admin if there are credentials but no existing query params
+      bool has_credentials = (uri_str.find('@') != std::string::npos);
+      bool has_query_params = (query_start != std::string::npos);
+      
+      if (has_credentials && !has_query_params) {
+        mongo_uri += "?authSource=admin";
+      } else if (query_start != std::string::npos) {
+        std::string query_params = uri_str.substr(uri_str.find('?') + 1);
+        // Check if authSource is already specified
+        if (query_params.find("authSource") == std::string::npos) {
+          mongo_uri += "?authSource=admin&" + query_params;
+        } else {
+          mongo_uri += "?" + query_params;
+        }
       }
       
       // Replace mongo_connection_string with proper MongoDB URI (without collection)

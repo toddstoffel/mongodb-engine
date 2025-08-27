@@ -128,6 +128,8 @@ target_include_directories(mongodb PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/sources/server/include
     ${CMAKE_CURRENT_SOURCE_DIR}/sources/server/include/mysql/server
     ${CMAKE_CURRENT_SOURCE_DIR}/sources/server/sql
+    ${CMAKE_CURRENT_SOURCE_DIR}/sources/server/libmariadb/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/sources/server/wsrep-lib/wsrep-API/v26
     ${LIBMONGOC_INCLUDE_DIRS}
     ${LIBBSON_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}/include

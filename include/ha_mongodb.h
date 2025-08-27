@@ -130,6 +130,9 @@ class ha_mongodb final : public handler
   THR_LOCK_DATA lock;           // MariaDB lock integration
   MONGODB_SHARE *share;         // Shared table metadata
   
+  // Table capability flags - must be set in constructor
+  ulonglong int_table_flags;
+  
   // MongoDB-specific components
   mongoc_client_t *client;      // MongoDB client connection
   mongoc_collection_t *collection; // MongoDB collection handle
@@ -185,14 +188,16 @@ public:
   ~ha_mongodb();
 
   /*
-    Storage engine capability flags - Remove problematic flags
+    Storage engine capability flags - return the member variable set in constructor
   */
   ulonglong table_flags() const override
   {
-    return (HA_FILE_BASED | HA_REC_NOT_IN_SEQ | HA_AUTO_PART_KEY |
-            HA_CAN_INDEX_BLOBS | HA_BINLOG_ROW_CAPABLE | 
-            HA_BINLOG_STMT_CAPABLE | HA_PARTIAL_COLUMN_READ |
-            HA_NULL_IN_KEY | HA_STATS_RECORDS_IS_EXACT);
+    // DEBUG: Verify that condition pushdown flag is set
+    fprintf(stderr, "TABLE_FLAGS CALLED! Returning flags=0x%llx, HA_CAN_TABLE_CONDITION_PUSHDOWN=%s\n", 
+            int_table_flags, (int_table_flags & HA_CAN_TABLE_CONDITION_PUSHDOWN) ? "YES" : "NO");
+    fflush(stderr);
+    
+    return int_table_flags;
   }
 
   ulong index_flags(uint inx, uint part, bool all_parts) const override
@@ -249,7 +254,8 @@ public:
   ha_rows estimate_rows_upper_bound() override;
   
   // Condition pushdown for query optimization
-  const Item *cond_push(const Item *cond) override;
+    // Condition pushdown support
+  const COND *cond_push(const COND *cond) override;
   void cond_pop() override;
   
   // Locking integration

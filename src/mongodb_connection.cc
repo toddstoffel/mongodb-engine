@@ -107,11 +107,15 @@ mongoc_client_t* MongoConnectionPool::create_new_connection()
   // Get the connection string for mongo-c-driver (without collection)
   std::string mongo_connection_string = parsed_uri.to_connection_string();
   
+  // Debug: Print the exact URI being used for connection
+  fprintf(stderr, "CONNECT: URI passed to mongoc_client_new_from_uri: '%s'\n", mongo_connection_string.c_str());
+  fflush(stderr);
+  
   mongoc_uri_t* uri = mongoc_uri_new(mongo_connection_string.c_str());
   if (!uri)
   {
-    // TODO: Add proper logging when available
-    // sql_print_error("MongoDB storage engine: Invalid URI format: %s", mongo_connection_string.c_str());
+    fprintf(stderr, "CONNECT: mongoc_uri_new() failed - invalid URI format\n");
+    fflush(stderr);
     return nullptr;
   }
   

@@ -22,13 +22,24 @@ typedef Item COND;  // COND is typedef for Item in MariaDB
    Constructor - Initialize a new handler instance
 */
 ha_mongodb::ha_mongodb(handlerton *hton, TABLE_SHARE *table_arg)
-  : handler(hton, table_arg), 
-    int_table_flags(HA_CAN_INDEX_BLOBS | HA_CAN_TABLE_CONDITION_PUSHDOWN | HA_TABLE_SCAN_ON_INDEX),
-    share(nullptr), cursor(nullptr), scan_position(0)
+  : handler(hton, table_arg),
+    share(nullptr),
+    client(nullptr),
+    collection(nullptr),
+    cursor(nullptr),
+    current_doc(nullptr),
+    scan_position(0),
+    int_table_flags(HA_CAN_TABLE_CONDITION_PUSHDOWN | HA_PRIMARY_KEY_IN_READ_INDEX | 
+                   HA_FILE_BASED | HA_REC_NOT_IN_SEQ | HA_AUTO_PART_KEY | 
+                   HA_CAN_INDEX_BLOBS | HA_NULL_IN_KEY),
+    pushed_condition(nullptr),
+    key_read_mode(false),
+    count_mode(false),
+    active_index(0),
+    mongo_count_result(0),
+    mongo_count_returned(0)
 {
-  // Initialize basic state
-  fprintf(stderr, "ha_mongodb::ha_mongodb() CONSTRUCTOR called, int_table_flags=0x%llx\n", int_table_flags);
-}
+  fprintf(stderr, "ha_mongodb::ha_mongodb() CONSTRUCTOR called, int_table_flags=0x%llx\n", int_table_flags);}
 
 /*
    Destructor - Clean up handler instance
@@ -115,7 +126,30 @@ int ha_mongodb::rnd_init(bool scan)
   *row_counter_ptr = 0;
   
   fprintf(stderr, "RND_INIT CALLED! scan=%d, table=%p, reset row counter\n", scan, table);
+  
+  // CRITICAL: Reset count_mode at start of each scan
+  // Operation 46 is called for many non-COUNT queries, so we can't rely on it
+  if (scan) {  // Reset for table scans
+    fprintf(stderr, "RND_INIT: Resetting count_mode for new table scan\n");
+    count_mode = false;
+    mongo_count_result = 0;
+    mongo_count_returned = 0;
+    
+    // CRITICAL: Also reset any persistent pushed_condition that might be stuck
+    // This prevents previous WHERE clauses from affecting new queries
+    if (pushed_condition) {
+      fprintf(stderr, "RND_INIT: WARNING - Found persistent pushed_condition, cleaning up\n");
+      char* old_filter = bson_as_canonical_extended_json(pushed_condition, nullptr);
+      fprintf(stderr, "RND_INIT: Removing stuck filter: %s\n", old_filter);
+      bson_free(old_filter);
+      bson_destroy(pushed_condition);
+      pushed_condition = nullptr;
+    }
+  }
+  
+  fprintf(stderr, "RND_INIT: count_mode=%d, key_read_mode=%d\n", count_mode, key_read_mode);
   fprintf(stderr, "RND_INIT: pushed_condition=%p\n", (void*)pushed_condition);
+  fflush(stderr);  // Force immediate output
   
   // Simple test - just try to connect to MongoDB
   if (!collection)
@@ -128,6 +162,40 @@ int ha_mongodb::rnd_init(bool scan)
       // Error already reported by connect_to_mongodb() or stash_remote_error()
       DBUG_RETURN(connect_result);
     }
+  }
+  
+  // COUNT MODE: Use MongoDB native count instead of fetching documents
+  if (count_mode) {  // Remove key_read_mode requirement - count_mode alone is enough
+    fprintf(stderr, "RND_INIT: COUNT MODE DETECTED - using MongoDB native count optimization\n");
+    fprintf(stderr, "RND_INIT: count_mode=%d, key_read_mode=%d\n", count_mode, key_read_mode);
+    fprintf(stderr, "RND_INIT: collection=%p, database=%s, collection_name=%s\n", 
+            collection, share ? share->database_name : "NULL", share ? share->collection_name : "NULL");
+    
+    bson_t *query = pushed_condition ? bson_copy(pushed_condition) : bson_new();
+    
+    // Debug: show the exact query being sent to MongoDB
+    char *query_str = bson_as_canonical_extended_json(query, nullptr);
+    fprintf(stderr, "RND_INIT: MongoDB count query: %s\n", query_str);
+    bson_free(query_str);
+    
+    bson_error_t error;
+    
+    int64_t count = mongoc_collection_count_documents(collection, query, nullptr, nullptr, nullptr, &error);
+    bson_destroy(query);
+    
+    if (count < 0) {
+      fprintf(stderr, "RND_INIT: MongoDB count error: %s\n", error.message);
+      DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+    }
+    
+    // Store count for rnd_next() optimization
+    mongo_count_result = (ha_rows)count;
+    mongo_count_returned = 0;
+    fprintf(stderr, "RND_INIT: MongoDB native count returned: %lld documents (stored as mongo_count_result=%llu)\n", 
+            (long long)count, (unsigned long long)mongo_count_result);
+    
+    // Don't create cursor for count operations
+    DBUG_RETURN(0);
   }
   
   // Reset the static row counter for new scan
@@ -199,6 +267,22 @@ int ha_mongodb::rnd_next(uchar *buf)
 {
   DBUG_ENTER("ha_mongodb::rnd_next");
   
+  fprintf(stderr, "RND_NEXT CALLED! count_mode=%d, key_read_mode=%d\n", count_mode, key_read_mode);
+  fflush(stderr);
+  
+  // COUNT MODE: Return count result without fetching documents
+  if (count_mode) {  // Remove key_read_mode requirement
+    fprintf(stderr, "RND_NEXT: COUNT MODE - storage engine COUNT optimization\n");
+    fprintf(stderr, "RND_NEXT: count_mode=%d, key_read_mode=%d, mongo_count_result=%lld\n", 
+            count_mode, key_read_mode, (long long)mongo_count_result);
+    
+    // For COUNT operations, immediately signal end of file
+    // The actual count was already provided through other means
+    fprintf(stderr, "RND_NEXT: COUNT MODE - immediately returning HA_ERR_END_OF_FILE\n");
+    DBUG_RETURN(HA_ERR_END_OF_FILE);
+  }
+  
+  // Normal document fetching mode
   if (!cursor)
   {
     DBUG_RETURN(HA_ERR_END_OF_FILE);
@@ -269,6 +353,8 @@ int ha_mongodb::rnd_end()
 {
   DBUG_ENTER("ha_mongodb::rnd_end");
   
+  fprintf(stderr, "RND_END CALLED! Cleaning up count_mode=%d\n", count_mode);
+  
   // Clean up cursor
   if (cursor)
   {
@@ -276,6 +362,12 @@ int ha_mongodb::rnd_end()
     cursor = nullptr;
   }
   current_doc = nullptr;
+  
+  // Reset count mode state
+  count_mode = false;
+  mongo_count_result = 0;
+  mongo_count_returned = 0;
+  
   DBUG_RETURN(0);
 }
 
@@ -286,7 +378,9 @@ int ha_mongodb::info(uint flag)
 {
   DBUG_ENTER("ha_mongodb::info");
   
-  fprintf(stderr, "INFO CALLED with flag: %u\n", flag);
+  fprintf(stderr, "INFO() CALLED with flag: %u - this might be used for COUNT optimization!\n", flag);
+  fprintf(stderr, "INFO: count_mode=%d, key_read_mode=%d\n", count_mode, key_read_mode);
+  fflush(stderr);
   
   // Initialize stats to safe defaults
   stats.records = 0;
@@ -297,9 +391,12 @@ int ha_mongodb::info(uint flag)
   stats.delete_length = 0;
   stats.auto_increment_value = 0;
   
-  // If we have a connection and collection, try to get real statistics
-  if (client && collection)
+  // Only try to get real statistics if we have valid connection and collection
+  // During ALTER operations, these might be null, so we need to be defensive
+  if (client && collection && share && share->connection_string)
   {
+    fprintf(stderr, "INFO: Getting MongoDB document count for statistics\n");
+    
     // Get document count from MongoDB
     bson_error_t error;
     bson_t *filter = bson_new(); // Empty filter = count all documents
@@ -319,57 +416,25 @@ int ha_mongodb::info(uint flag)
     {
       stats.records = (ha_rows)doc_count;
       stats.data_file_length = stats.records * stats.mean_rec_length;
+      fprintf(stderr, "INFO: Successfully got MongoDB count: %lld documents\n", (long long)doc_count);
+      fprintf(stderr, "INFO: Set stats.records = %llu for COUNT optimization\n", (unsigned long long)stats.records);
       
-      fprintf(stderr, "INFO: Got document count: %lld\n", (long long)doc_count);
+      // CRITICAL: For COUNT(*) operations, MariaDB may use stats.records directly
+      // This enables COUNT pushdown for simple COUNT(*) without WHERE clauses
+      if (count_mode) {
+        fprintf(stderr, "INFO: COUNT MODE - MariaDB may use this count directly!\n");
+      }
     }
     else
     {
-      fprintf(stderr, "INFO: Failed to get document count: %s\n", error.message);
-      // Keep defaults
-    }
-  }
-  else if (share && share->mongo_connection_string)
-  {
-    // Try to establish a temporary connection for statistics
-    fprintf(stderr, "INFO: Attempting temporary connection for statistics\n");
-    
-    mongoc_client_t *temp_client = mongoc_client_new(share->mongo_connection_string);
-    if (temp_client)
-    {
-      mongoc_collection_t *temp_collection = mongoc_client_get_collection(
-        temp_client, share->database_name, share->collection_name);
-      
-      if (temp_collection)
-      {
-        bson_error_t error;
-        bson_t *filter = bson_new();
-        
-        int64_t doc_count = mongoc_collection_count_documents(
-          temp_collection,
-          filter,
-          NULL, NULL, NULL,
-          &error
-        );
-        
-        bson_destroy(filter);
-        
-        if (doc_count >= 0)
-        {
-          stats.records = (ha_rows)doc_count;
-          stats.data_file_length = stats.records * stats.mean_rec_length;
-          
-          fprintf(stderr, "INFO: Got document count via temp connection: %lld\n", (long long)doc_count);
-        }
-        
-        mongoc_collection_destroy(temp_collection);
-      }
-      mongoc_client_destroy(temp_client);
+      fprintf(stderr, "INFO: Failed to get MongoDB count: %s\n", error.message);
+      // Failed to get document count, keep defaults
     }
   }
   else
   {
-    fprintf(stderr, "INFO: No collection available for statistics (client=%p, collection=%p)\n", 
-            (void*)client, (void*)collection);
+    // No valid connection available during this operation (e.g., ALTER TABLE)
+    // This is normal - just return safe defaults
   }
   
   DBUG_RETURN(0);
@@ -502,44 +567,13 @@ int ha_mongodb::index_init(uint keynr, bool sorted)
 {
   DBUG_ENTER("ha_mongodb::index_init");
   
-  fprintf(stderr, "INDEX_INIT CALLED! keynr=%u, sorted=%d\n", keynr, sorted);
+  fprintf(stderr, "INDEX_INIT CALLED! keynr=%u, sorted=%d (FederatedX pattern)\n", keynr, sorted);
   
-  // For ORDER BY support, initialize a sorted cursor
-  if (!collection)
-  {
-    if (connect_to_mongodb())
-    {
-      DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
-    }
-  }
+  // Follow FederatedX pattern: just set active index and return success
+  // The actual cursor initialization will happen in index_read_map
+  active_index = keynr;
   
-  // Create MongoDB query with sorting for ORDER BY
-  bson_t *query = bson_new();  // Empty query = scan all
-  bson_t *opts = bson_new();
-  
-  // Note: Let MariaDB handle ORDER BY through external sorting
-  // Storage engines should not implement sorting with hardcoded field names
-  // The 'sorted' parameter indicates MariaDB wants sorted results,
-  // but we'll let MariaDB sort the rows we return via rnd_next()
-  
-  if (sorted && keynr == 0) 
-  {
-    fprintf(stderr, "INDEX_INIT: MariaDB requesting sorted results (will use external sorting)\n");
-  }
-  
-  cursor = mongoc_collection_find_with_opts(collection, query, opts, nullptr);
-  
-  bson_destroy(query);
-  bson_destroy(opts);
-  
-  if (!cursor)
-  {
-    fprintf(stderr, "INDEX_INIT: Failed to create cursor\n");
-    DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
-  }
-  
-  current_doc = nullptr;
-  fprintf(stderr, "INDEX_INIT: Successfully initialized index with sorting\n");
+  fprintf(stderr, "INDEX_INIT: Set active_index=%u, returning success\n", active_index);
   DBUG_RETURN(0);
 }
 
@@ -547,14 +581,37 @@ int ha_mongodb::index_read_map(uchar *buf, const uchar *key, key_part_map keypar
 {
   DBUG_ENTER("ha_mongodb::index_read_map");
   
-  fprintf(stderr, "INDEX_READ_MAP CALLED - starting index scan\n");
+  fprintf(stderr, "INDEX_READ_MAP ENTRY: buf=%p, key=%p, keypart_map=%u, find_flag=%d\n", 
+          (void*)buf, (void*)key, (uint)keypart_map, (int)find_flag);
   
-  // Get the first row using the cursor from index_init
+  // Initialize connection if needed (following FederatedX pattern)
+  if (!collection)
+  {
+    if (connect_to_mongodb())
+    {
+      fprintf(stderr, "INDEX_READ_MAP: Connection failed\n");
+      DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+    }
+  }
+  
+  // Initialize cursor if needed (following FederatedX pattern)
   if (!cursor)
   {
-    fprintf(stderr, "INDEX_READ_MAP: No cursor available\n");
-    DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+    fprintf(stderr, "INDEX_READ_MAP: Initializing cursor for index operations\n");
+    bson_t *query = pushed_condition ? bson_copy(pushed_condition) : bson_new();
+    cursor = mongoc_collection_find_with_opts(collection, query, nullptr, nullptr);
+    bson_destroy(query);
+    
+    if (!cursor)
+    {
+      fprintf(stderr, "INDEX_READ_MAP: Failed to create cursor\n");
+      DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+    }
+    current_doc = nullptr;
+    scan_position = 0;
   }
+  
+  fprintf(stderr, "INDEX_READ_MAP: Proceeding with read operation\n");
   
   // Use the same logic as rnd_next to get the first document
   if (!mongoc_cursor_next(cursor, &current_doc))
@@ -570,22 +627,53 @@ int ha_mongodb::index_read_map(uchar *buf, const uchar *key, key_part_map keypar
     DBUG_RETURN(HA_ERR_END_OF_FILE);
   }
   
-  // Convert document to row
-  memset(buf, 0, table->s->reclength);
-  if (convert_document_to_row(current_doc, buf))
+  // Check if we're in key-only mode (for COUNT operations)
+  if (key_read_mode)
   {
-    fprintf(stderr, "INDEX_READ_MAP: Document conversion failed\n");
-    DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+    fprintf(stderr, "INDEX_READ_MAP: Key-only mode - COUNT optimization\n");
+    // For key-only reads (COUNT), we just need to indicate we have a row
+    // MariaDB will count the successful returns without needing full data
+    memset(buf, 0, table->s->reclength);
+    // For PRIMARY KEY (_id), just set the key field if it exists
+    // This is sufficient for COUNT operations
+  }
+  else
+  {
+    fprintf(stderr, "INDEX_READ_MAP: Full row mode - converting document\n");
+    // Convert document to row for full reads
+    memset(buf, 0, table->s->reclength);
+    if (convert_document_to_row(current_doc, buf))
+    {
+      fprintf(stderr, "INDEX_READ_MAP: Document conversion failed\n");
+      DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+    }
   }
   
   fprintf(stderr, "INDEX_READ_MAP: Successfully returned first row\n");
   DBUG_RETURN(0);
 }
 
+int ha_mongodb::index_read(uchar *buf, const uchar *key, uint key_len, enum ha_rkey_function find_flag)
+{
+  DBUG_ENTER("ha_mongodb::index_read");
+  
+  fprintf(stderr, "INDEX_READ CALLED! key_len=%u, find_flag=%d (FederatedX compatibility)\n", key_len, (int)find_flag);
+  
+  // Convert key_len to key_part_map for index_read_map compatibility
+  key_part_map keypart_map = (1UL << key_len) - 1;  // Simple conversion
+  
+  // Call our main index_read_map implementation
+  int result = index_read_map(buf, key, keypart_map, find_flag);
+  
+  fprintf(stderr, "INDEX_READ: Delegated to index_read_map, result=%d\n", result);
+  DBUG_RETURN(result);
+}
+
 int ha_mongodb::index_next(uchar *buf)
 {
   DBUG_ENTER("ha_mongodb::index_next");
   
+  fprintf(stderr, "INDEX_NEXT CALLED (key_read_mode=%d)\n", key_read_mode);
   
   if (!cursor)
   {
@@ -603,16 +691,27 @@ int ha_mongodb::index_next(uchar *buf)
       DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
     }
     
+    fprintf(stderr, "INDEX_NEXT: End of cursor reached\n");
     DBUG_RETURN(HA_ERR_END_OF_FILE);
   }
   
-  
-  // Convert document to row
-  memset(buf, 0, table->s->reclength);
-  if (convert_document_to_row(current_doc, buf))
+  // Check if we're in key-only mode (for COUNT operations)
+  if (key_read_mode)
   {
-    fprintf(stderr, "INDEX_NEXT: Document conversion failed\n");
-    DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+    fprintf(stderr, "INDEX_NEXT: Key-only mode - COUNT optimization\n");
+    // For key-only reads (COUNT), we just need to indicate we have a row
+    memset(buf, 0, table->s->reclength);
+  }
+  else
+  {
+    fprintf(stderr, "INDEX_NEXT: Full row mode - converting document\n");
+    // Convert document to row for full reads
+    memset(buf, 0, table->s->reclength);
+    if (convert_document_to_row(current_doc, buf))
+    {
+      fprintf(stderr, "INDEX_NEXT: Document conversion failed\n");
+      DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+    }
   }
   
   DBUG_RETURN(0);
@@ -639,6 +738,108 @@ int ha_mongodb::index_end()
 /*
    Data modification operations - stub implementations
 */
+// Range operations - required for COUNT(*) with PRIMARY KEY
+int ha_mongodb::read_range_first(const key_range *start_key, const key_range *end_key,
+                                bool eq_range, bool sorted)
+{
+  fprintf(stderr, "READ_RANGE_FIRST CALLED! eq_range=%d, sorted=%d\n", eq_range, sorted);
+  
+  // For MongoDB, we don't have actual ranges like SQL databases
+  // We'll just initialize a cursor for the entire collection
+  // and let index_next() handle the iteration
+  
+  if (cursor) {
+    mongoc_cursor_destroy(cursor);
+    cursor = nullptr;
+  }
+  
+  // Initialize cursor for entire collection (MongoDB doesn't have traditional ranges)
+  bson_t *query = bson_new();
+  
+  if (key_read_mode) {
+    // For COUNT(*) operations, we only need to count documents
+    fprintf(stderr, "READ_RANGE_FIRST: key_read_mode enabled, optimizing for COUNT\n");
+  }
+  
+  cursor = mongoc_collection_find_with_opts(collection, query, nullptr, nullptr);
+  
+  bson_destroy(query);
+  
+  if (!cursor) {
+    fprintf(stderr, "READ_RANGE_FIRST: Failed to create cursor\n");
+    return HA_ERR_INTERNAL_ERROR;
+  }
+  
+  fprintf(stderr, "READ_RANGE_FIRST: Success, cursor initialized\n");
+  return 0;
+}
+
+int ha_mongodb::read_range_next()
+{
+  fprintf(stderr, "READ_RANGE_NEXT CALLED!\n");
+  
+  if (!cursor) {
+    fprintf(stderr, "READ_RANGE_NEXT: No cursor available\n");
+    return HA_ERR_END_OF_FILE;
+  }
+  
+  // Get next document from cursor
+  if (!mongoc_cursor_next(cursor, &current_doc)) {
+    bson_error_t error;
+    if (mongoc_cursor_error(cursor, &error)) {
+      fprintf(stderr, "READ_RANGE_NEXT: Cursor error: %s\n", error.message);
+      return HA_ERR_INTERNAL_ERROR;
+    }
+    fprintf(stderr, "READ_RANGE_NEXT: End of results\n");
+    return HA_ERR_END_OF_FILE;
+  }
+  
+  // For key_read_mode (COUNT operations), we don't need to fill the buffer
+  if (key_read_mode) {
+    fprintf(stderr, "READ_RANGE_NEXT: key_read_mode - counting document\n");
+    return 0;
+  }
+  
+  fprintf(stderr, "READ_RANGE_NEXT: Got document, would convert to row\n");
+  // Note: We don't have the buf parameter here, so we'll handle this in the actual read methods
+  return 0;
+}
+
+// Record counting - MongoDB native count pushdown
+ha_rows ha_mongodb::records()
+{
+  fprintf(stderr, "RECORDS() CALLED - implementing MongoDB native count pushdown\n");
+  
+  if (!collection) {
+    fprintf(stderr, "RECORDS: No collection available\n");
+    return 0;
+  }
+  
+  bson_error_t error;
+  bson_t *query = nullptr;
+  
+  // Use pushed condition if available (for COUNT with WHERE clause)
+  if (pushed_condition) {
+    query = bson_copy(pushed_condition);  // Use already converted BSON filter
+    fprintf(stderr, "RECORDS: Using pushed condition for COUNT\n");
+  } else {
+    query = bson_new();  // Empty query for COUNT(*)
+    fprintf(stderr, "RECORDS: Using empty query for COUNT(*)\n");
+  }
+  
+  // Use MongoDB's native count operation
+  int64_t count = mongoc_collection_count_documents(collection, query, nullptr, nullptr, nullptr, &error);
+  
+  bson_destroy(query);
+  
+  if (count < 0) {
+    fprintf(stderr, "RECORDS: MongoDB count error: %s\n", error.message);
+    return 0;
+  }
+  
+  fprintf(stderr, "RECORDS: MongoDB native count returned: %lld documents\n", (long long)count);
+  return (ha_rows)count;
+}
 int ha_mongodb::write_row(const uchar *buf)
 {
   DBUG_ENTER("ha_mongodb::write_row");
@@ -711,41 +912,15 @@ ha_rows ha_mongodb::records_in_range(uint inx, const key_range *min_key, const k
 {
   DBUG_ENTER("ha_mongodb::records_in_range");
   
-  fprintf(stderr, "RECORDS_IN_RANGE CALLED for index %u\n", inx);
+  fprintf(stderr, "RECORDS_IN_RANGE CALLED for index %u (FederatedX pattern)\n", inx);
   
-  // If no keys specified (full table scan), return total count
-  if (!min_key && !max_key && client && collection)
-  {
-    // Get document count from MongoDB
-    bson_error_t error;
-    bson_t *filter = bson_new(); // Empty filter = count all documents
-    
-    int64_t doc_count = mongoc_collection_count_documents(
-      collection,
-      filter,     // Empty filter
-      NULL,       // No options
-      NULL,       // No read prefs
-      NULL,       // No reply
-      &error
-    );
-    
-    bson_destroy(filter);
-    
-    if (doc_count >= 0)
-    {
-      fprintf(stderr, "RECORDS_IN_RANGE: Got document count: %lld\n", (long long)doc_count);
-      DBUG_RETURN((ha_rows)doc_count);
-    }
-    else
-    {
-      fprintf(stderr, "RECORDS_IN_RANGE: Failed to get document count: %s\n", error.message);
-    }
-  }
+  // Follow FederatedX pattern: return a small constant to encourage index usage
+  // FederatedX comment: "We really want indexes to be used as often as possible, 
+  // therefore we just need to hard-code the return value to a very low number to force the issue"
+  ha_rows result = MONGODB_RECORDS_IN_RANGE;
   
-  // For range queries or when connection not available, return estimate
-  fprintf(stderr, "RECORDS_IN_RANGE: Returning estimate (client=%p, collection=%p)\n", 
-          (void*)client, (void*)collection);
-  DBUG_RETURN(100); // Conservative estimate
+  fprintf(stderr, "RECORDS_IN_RANGE: Returning %llu (encourages index usage)\n", (unsigned long long)result);
+  DBUG_RETURN(result);
 }
 
 /*
@@ -839,6 +1014,48 @@ bool ha_mongodb::get_error_message(int error, String *buf)
 int ha_mongodb::extra(enum ha_extra_function operation)
 {
   DBUG_ENTER("ha_mongodb::extra");
+  
+  fprintf(stderr, "EXTRA CALLED with operation: %d\n", (int)operation);
+  
+  switch (operation) {
+    case HA_EXTRA_RESET_STATE:
+      fprintf(stderr, "EXTRA: HA_EXTRA_RESET_STATE\n");
+      key_read_mode = false;  // Reset key-only mode
+      count_mode = false;     // Reset count mode
+      break;
+    case HA_EXTRA_KEYREAD:
+      fprintf(stderr, "EXTRA: HA_EXTRA_KEYREAD - enabling key-only mode\n");
+      key_read_mode = true;   // Enable key-only mode for COUNT optimization
+      break;
+    case HA_EXTRA_NO_KEYREAD:
+      fprintf(stderr, "EXTRA: HA_EXTRA_NO_KEYREAD - disabling key-only mode\n");
+      key_read_mode = false;  // Disable key-only mode
+      break;
+    case HA_EXTRA_IGNORE_DUP_KEY:
+      fprintf(stderr, "EXTRA: HA_EXTRA_IGNORE_DUP_KEY\n");
+      break;
+    case HA_EXTRA_NO_IGNORE_DUP_KEY:
+      fprintf(stderr, "EXTRA: HA_EXTRA_NO_IGNORE_DUP_KEY\n");
+      break;
+    case 4:  // Likely HA_EXTRA_RETRIEVE_ALL_COLS or similar
+      fprintf(stderr, "EXTRA: Operation 4 (retrieve columns)\n");
+      break;
+    case 5:  // Required for basic operations
+      fprintf(stderr, "EXTRA: Operation 5 (basic operation)\n");
+      break;
+    case 43: // Required for basic operations
+      fprintf(stderr, "EXTRA: Operation 43 (basic operation)\n");
+      break;
+    case 46: // HA_EXTRA_DETACH_CHILDREN - NOT related to COUNT
+      fprintf(stderr, "EXTRA: Operation 46 (HA_EXTRA_DETACH_CHILDREN) - table management operation\n");
+      // This is unrelated to COUNT operations - do not set count_mode
+      break;
+    default:
+      fprintf(stderr, "EXTRA: Unknown operation %d - returning success\n", (int)operation);
+      break;
+  }
+  
+  // Return success for all operations - be permissive rather than restrictive
   DBUG_RETURN(0);
 }
 
@@ -1458,3 +1675,10 @@ int ha_mongodb::rollback(THD *thd, bool all)
   // For now, just return success for Phase 1 compatibility
   DBUG_RETURN(0);
 }
+
+/*
+  Index flags - specify what operations our indexes support
+*/
+/*
+  Helper method implementations
+*/

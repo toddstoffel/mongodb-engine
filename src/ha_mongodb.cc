@@ -152,7 +152,7 @@ static handler *mongodb_create_handler(handlerton *hton, TABLE_SHARE *table,
                                       MEM_ROOT *mem_root)
 {
   DBUG_ENTER("mongodb_create_handler");
-  DBUG_RETURN(new (mem_root) ha_mongodb(hton, table));
+  DBUG_RETURN((handler*) new (mem_root) ha_mongodb(hton, table));
 }
 
 /*

@@ -139,6 +139,15 @@ class ha_mongodb final : public handler
   mongoc_cursor_t *cursor;      // Current query cursor
   const bson_t *current_doc;    // Current document being processed
   
+  // Operation mode flags
+  bool key_read_mode;           // True when in key-only reading mode (for COUNT)
+  bool count_mode;              // True when doing COUNT operations - use MongoDB native count
+  uint active_index;            // Currently active index (FederatedX pattern)
+  
+  // COUNT optimization state
+  ha_rows mongo_count_result;   // Result from MongoDB count operation
+  ha_rows mongo_count_returned; // How many count results we've returned to MariaDB
+  
   // Query and schema management
   MongoQueryTranslator *translator;
   MongoCursorManager *cursor_manager;
@@ -202,7 +211,7 @@ public:
 
   ulong index_flags(uint inx, uint part, bool all_parts) const override
   {
-    return (HA_READ_NEXT | HA_READ_RANGE | HA_KEYREAD_ONLY);
+    return (HA_READ_NEXT | HA_READ_RANGE);
   }
 
   /*
@@ -237,8 +246,17 @@ public:
   // Index operations (MongoDB index utilization)
   int index_init(uint keynr, bool sorted) override;
   int index_read_map(uchar *buf, const uchar *key, key_part_map keypart_map, enum ha_rkey_function find_flag) override;
+  int index_read(uchar *buf, const uchar *key, uint key_len, enum ha_rkey_function find_flag) override;
   int index_next(uchar *buf) override;
   int index_end() override;
+  
+  // Range operations (required for COUNT(*) with PRIMARY KEY)
+  int read_range_first(const key_range *start_key, const key_range *end_key,
+                      bool eq_range, bool sorted) override;
+  int read_range_next() override;
+  
+  // Record counting - implement MongoDB native count pushdown
+  ha_rows records() override;
   
   // Data modification operations (future implementation)
   int write_row(const uchar *buf) override;

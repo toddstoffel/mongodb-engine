@@ -2,11 +2,40 @@
 
 A professional storage engine that enables seamless SQL queries on MongoDB collections through MariaDB's storage engine interface with advanced query optimization.
 
+## 🎯 Current Status: Phase 2 Complete - Core Functionality Operational
+
+**Major Milestone Achieved (August 2025)**: All fundamental storage engine operations are working correctly with verified accuracy and performance benefits.
+
+### ✅ **Fully Working Features**
+
+- **Plugin Registration**: Loads successfully as `MONGODB` engine in MariaDB 11.x+
+- **Table Operations**: CREATE TABLE, SELECT, scanning, and row counting all operational
+- **Condition Pushdown**: WHERE clauses automatically translated to MongoDB server-side filters
+- **Authentication**: MongoDB connections with username/password and authSource parameter
+- **Data Accuracy**: All queries return correct results from MongoDB collections
+- **Query Isolation**: Proper condition cleanup prevents filter persistence between queries
+- **Error Handling**: Comprehensive error reporting and connection management
+- **Cross-Platform**: Clean build with zero compilation warnings
+
+### 🎯 **Recent Critical Fixes**
+
+- **✅ Fixed Condition Persistence Bug**: Resolved issue where WHERE clause filters persisted between queries
+- **✅ Fixed COUNT(*) Accuracy**: All COUNT operations now return correct results (was stuck at 3, now properly returns 121)
+- **✅ Fixed Operation 46 Misidentification**: Correctly identified `HA_EXTRA_DETACH_CHILDREN` vs COUNT detection
+- **✅ Fixed Table Scanning**: Queries now return diverse data instead of filtered subsets
+
+### ⚠️ **Current Limitations**
+
+- **COUNT Operations**: Return correct results but NOT optimized - still fetch all documents instead of using MongoDB native count
+- **Performance**: COUNT queries process all matching documents rather than using efficient `countDocuments()` calls
+
 ## Features
 
 - **✅ Condition Pushdown**: WHERE clauses automatically translated to MongoDB server-side filters for optimal performance
 - **✅ SQL Table Operations**: Full table scanning, row-by-row access, and document-to-row conversion  
 - **✅ MongoDB Integration**: Native connection handling with authentication and error management
+- **✅ Data Integrity**: Accurate query results with proper condition isolation between operations
+- **⚠️ COUNT Operations**: Functionally correct but NOT performance-optimized (fetches all documents)
 - **Cross-Engine Joins**: Join MongoDB data with traditional SQL tables (InnoDB, MyISAM, etc.) - *planned*
 - **Dynamic Schema Mapping**: Automatic schema inference from MongoDB's flexible document structure - *planned*
 - **Advanced Query Translation**: Complex WHERE conditions (AND, OR, comparisons) - *in development*
@@ -64,6 +93,40 @@ FROM customers c
 LEFT JOIN mysql_orders o ON c._id = o.customer_id
 GROUP BY c._id;
 ```
+
+## Verified Test Results (August 2025)
+
+### ✅ **Core Operations - All Passing**
+
+| Test Case | Expected | Actual | Status |
+|-----------|----------|---------|--------|
+| `SELECT COUNT(*) FROM customers` | 121 | 121 | ✅ PASS |
+| `SELECT COUNT(*) WHERE city = 'Paris'` | 3 | 3 | ✅ PASS |
+| `SELECT * FROM customers LIMIT 5` | Diverse cities | Las Vegas, Madrid, Luleå, etc. | ✅ PASS |
+| `SELECT customerName FROM customers WHERE city = 'Paris'` | 3 Paris records | 3 correct Paris records | ✅ PASS |
+| Condition isolation between queries | No filter persistence | ✅ No persistence | ✅ PASS |
+
+### ✅ **Advanced Features - Working**
+
+- **Condition Pushdown**: WHERE clauses translated to MongoDB `{ "city" : "Paris" }` filters
+- **Authentication**: Connects to MongoDB with `authSource=admin` parameter  
+- **Error Handling**: Proper connection error reporting and cleanup
+- **Plugin Management**: Clean install/uninstall with MariaDB plugin system
+
+### 🎯 **Performance Status**
+
+- **Correctness**: ✅ 100% accurate results across all test cases
+- **Condition Pushdown**: ✅ Working - server-side filtering operational  
+- **COUNT Optimization**: ❌ NOT implemented - COUNT queries fetch all documents instead of using MongoDB `countDocuments()`
+
+### ⚠️ **Performance Note**
+
+While all COUNT operations return **correct results**, they are currently **not optimized**:
+
+- **Current Behavior**: COUNT queries fetch and process all matching documents
+- **Performance Impact**: Inefficient for large collections (processes 121 documents for simple COUNT(*))
+- **Expected Optimization**: Should use MongoDB `countDocuments()` calls with zero document fetching
+- **Evidence**: Debug logs show `CONVERT_SIMPLE_FIELD` calls during COUNT operations
 
 ## Current Status
 

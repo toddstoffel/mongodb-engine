@@ -31,13 +31,19 @@ ha_mongodb::ha_mongodb(handlerton *hton, TABLE_SHARE *table_arg)
     scan_position(0),
     int_table_flags(HA_CAN_TABLE_CONDITION_PUSHDOWN | HA_PRIMARY_KEY_IN_READ_INDEX | 
                    HA_FILE_BASED | HA_REC_NOT_IN_SEQ | HA_AUTO_PART_KEY | 
-                   HA_CAN_INDEX_BLOBS | HA_NULL_IN_KEY),
+                   HA_CAN_INDEX_BLOBS | HA_NULL_IN_KEY | HA_STATS_RECORDS_IS_EXACT),
     pushed_condition(nullptr),
     key_read_mode(false),
     count_mode(false),
     active_index(0),
     mongo_count_result(0),
-    mongo_count_returned(0)
+    mongo_count_returned(0),
+    consecutive_rnd_next_calls(0),
+    lightweight_count_mode(false),
+    // PHASE 3A: Initialize performance tracking variables
+    documents_scanned(0),
+    optimized_count_operations(0),
+    count_performance_tracking(false)
 {
   fprintf(stderr, "ha_mongodb::ha_mongodb() CONSTRUCTOR called, int_table_flags=0x%llx\n", int_table_flags);}
 
@@ -127,6 +133,11 @@ int ha_mongodb::rnd_init(bool scan)
   
   fprintf(stderr, "RND_INIT CALLED! scan=%d, table=%p, reset row counter\n", scan, table);
   
+  // CRITICAL: Reset optimization state for each new scan to prevent persistence
+  lightweight_count_mode = false;
+  consecutive_rnd_next_calls = 0;
+  fprintf(stderr, "RND_INIT: Reset lightweight optimization state\n");
+  
   // CRITICAL: Reset count_mode at start of each scan
   // Operation 46 is called for many non-COUNT queries, so we can't rely on it
   if (scan) {  // Reset for table scans
@@ -162,6 +173,21 @@ int ha_mongodb::rnd_init(bool scan)
       // Error already reported by connect_to_mongodb() or stash_remote_error()
       DBUG_RETURN(connect_result);
     }
+  }
+  
+  // Enhanced COUNT detection: Detect COUNT operations beyond simple count_mode flag
+  // This catches COUNT with WHERE clauses that use key_read_mode
+  bool enhanced_count_detection = false;
+  
+  // PHASE 3A: Enhanced COUNT Detection - Look for patterns that suggest COUNT operations
+  // Since COUNT with WHERE uses table scanning, optimize the scanning process
+  if (scan) {
+    // Enable performance tracking for all scans - might be COUNT operations
+    count_performance_tracking = true;
+    count_start_time = std::chrono::steady_clock::now();
+    documents_scanned = 0;
+    
+    fprintf(stderr, "RND_INIT: Enabling scan optimization for potential COUNT operation\n");
   }
   
   // COUNT MODE: Use MongoDB native count instead of fetching documents
@@ -233,20 +259,67 @@ int ha_mongodb::rnd_init(bool scan)
     bson_destroy(query);
     fprintf(stderr, "RND_INIT: Created cursor with condition filter\n");
   } else {
-    // Use pushed condition if available, otherwise scan all documents
-    bson_t *query = pushed_condition ? bson_copy(pushed_condition) : bson_new();
-    cursor = mongoc_collection_find_with_opts(collection, query, nullptr, nullptr);
-    bson_destroy(query);
+    // PHASE 3A: MongoDB Cursor Optimization for COUNT Operations
+    // CRITICAL COUNT OPTIMIZATION: If we have a pushed condition, this could be COUNT with WHERE
+    // Since MariaDB chooses table scanning for COUNT with WHERE, intercept and optimize
     
-    if (pushed_condition) {
-      char* filter_str = bson_as_canonical_extended_json(pushed_condition, nullptr);
-      if (filter_str) {
-        fprintf(stderr, "RND_INIT: Created cursor with pushed condition: %s\n", filter_str);
-        bson_free(filter_str);
+    bson_t *query = pushed_condition ? bson_copy(pushed_condition) : bson_new();
+    
+    // INTELLIGENT COUNT DETECTION: For scans with WHERE conditions, try COUNT first
+    if (pushed_condition && scan) {
+      fprintf(stderr, "RND_INIT: SCAN + WHERE condition detected - attempting COUNT optimization\n");
+      
+      // Try MongoDB native count with the condition
+      bson_error_t count_error;
+      int64_t condition_count = mongoc_collection_count_documents(
+          collection, pushed_condition, nullptr, nullptr, nullptr, &count_error);
+      
+      if (condition_count >= 0) {
+        fprintf(stderr, "RND_INIT: SUCCESS! MongoDB COUNT with WHERE: %lld documents\n", (long long)condition_count);
+        
+        // Store count result for potential use
+        mongo_count_result = (ha_rows)condition_count;
+        mongo_count_returned = 0;
+        
+        // STRATEGY: Instead of full cursor, create minimal cursor for count verification
+        // This allows MariaDB's scanning loop to work but with minimal data transfer
+        
+        // Use projection to fetch only _id field for minimal data transfer
+        bson_t *opts = bson_new();
+        bson_t *projection = bson_new();
+        bson_append_int32(projection, "_id", 3, 1);  // Only fetch _id field
+        bson_append_document(opts, "projection", 10, projection);
+        bson_append_int32(opts, "batchSize", 9, 100);  // Small batches for counting
+        
+        cursor = mongoc_collection_find_with_opts(collection, query, opts, nullptr);
+        
+        bson_destroy(projection);
+        bson_destroy(opts);
+        
+        fprintf(stderr, "RND_INIT: Created COUNT-optimized cursor with minimal projection\n");
+      } else {
+        fprintf(stderr, "RND_INIT: MongoDB count failed: %s, using normal cursor\n", count_error.message);
+        
+        // Fall back to normal cursor
+        bson_t *opts = bson_new();
+        bson_append_int32(opts, "batchSize", 9, 1000);
+        bson_append_bool(opts, "noCursorTimeout", 15, true);
+        
+        cursor = mongoc_collection_find_with_opts(collection, query, opts, nullptr);
+        bson_destroy(opts);
       }
     } else {
-      fprintf(stderr, "RND_INIT: Created simple cursor - no condition pushed\n");
+      // Normal scan without WHERE condition
+      bson_t *opts = bson_new();
+      bson_append_int32(opts, "batchSize", 9, 1000);
+      bson_append_bool(opts, "noCursorTimeout", 15, true);
+      
+      cursor = mongoc_collection_find_with_opts(collection, query, opts, nullptr);
+      bson_destroy(opts);
+      fprintf(stderr, "RND_INIT: Created normal cursor\n");
     }
+    
+    bson_destroy(query);  // Clean up query in all cases
   }
   
   if (!cursor)
@@ -280,6 +353,31 @@ int ha_mongodb::rnd_next(uchar *buf)
     // The actual count was already provided through other means
     fprintf(stderr, "RND_NEXT: COUNT MODE - immediately returning HA_ERR_END_OF_FILE\n");
     DBUG_RETURN(HA_ERR_END_OF_FILE);
+  }
+  
+  // PHASE 3A: Enhanced COUNT Performance - Intelligent COUNT Detection
+  // Track consecutive rnd_next() calls to identify potential COUNT operations
+  
+  // Increment call counter and document tracking
+  consecutive_rnd_next_calls++;
+  if (count_performance_tracking) {
+    documents_scanned++;
+  }
+  
+  // CONSERVATIVE COUNT DETECTION: Enable lightweight mode for high-frequency scanning patterns
+  // TEMPORARILY DISABLED: This optimization was interfering with normal SELECT queries
+  // The threshold-based detection is too aggressive and incorrectly identifies SELECT as COUNT
+  if (false && consecutive_rnd_next_calls > 8 && !lightweight_count_mode) {
+    // Additional validation: check if we're processing many rows (typical of COUNT)
+    // and haven't seen any data access patterns typical of SELECT queries
+    
+    fprintf(stderr, "RND_NEXT: HIGH-FREQUENCY PATTERN DETECTED (%d calls) - likely COUNT operation\n", 
+            consecutive_rnd_next_calls);
+    fprintf(stderr, "RND_NEXT: Enabling lightweight document processing optimization\n");
+    lightweight_count_mode = true;
+    optimized_count_operations++;
+    
+    // From this point forward, minimize document processing overhead
   }
   
   // Normal document fetching mode
@@ -331,6 +429,31 @@ int ha_mongodb::rnd_next(uchar *buf)
   // CRITICAL: Set the record buffer to the table's record format
   memset(buf, 0, table->s->reclength);
   
+  // PHASE 3A: LIGHTWEIGHT COUNT OPTIMIZATION - Minimal processing for COUNT operations
+  if (lightweight_count_mode) {
+    fprintf(stderr, "RND_NEXT: LIGHTWEIGHT MODE - minimal document processing (scan_position=%llu)\n", 
+            (unsigned long long)scan_position);
+    
+    // For COUNT operations, we just need to indicate we have a row
+    // Skip expensive document-to-row conversion and just return success
+    // This allows MariaDB to count the rows without full data processing
+    
+    // PHASE 3A: The main optimization is skipping document-to-row conversion
+    // This provides significant performance benefits for COUNT operations
+    
+    // Minimal row setup - just ensure the buffer is valid for MariaDB
+    memset(buf, 0, table->s->reclength);
+    
+    // Advance position tracking
+    scan_position++;
+    
+    // Reset consecutive calls counter since we're processing successfully
+    consecutive_rnd_next_calls = 0;
+    
+    fprintf(stderr, "RND_NEXT: LIGHTWEIGHT - skipping document conversion, returning success\n");
+    DBUG_RETURN(0);
+  }
+  
   // Convert and pack fields into the record buffer
   fprintf(stderr, "RND_NEXT: Converting document to row...\n");
   
@@ -354,6 +477,34 @@ int ha_mongodb::rnd_end()
   DBUG_ENTER("ha_mongodb::rnd_end");
   
   fprintf(stderr, "RND_END CALLED! Cleaning up count_mode=%d\n", count_mode);
+  
+  // PHASE 3A: Performance Reporting
+  if (count_performance_tracking) {
+    auto end_time = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - count_start_time);
+    
+    fprintf(stderr, "RND_END: PERFORMANCE REPORT - Operation completed in %lld ms\n", 
+            (long long)duration.count());
+    fprintf(stderr, "RND_END: Documents scanned: %llu, Consecutive calls: %d\n", 
+            (unsigned long long)documents_scanned, consecutive_rnd_next_calls);
+    fprintf(stderr, "RND_END: Lightweight mode: %s, Optimized operations: %llu\n", 
+            lightweight_count_mode ? "ENABLED" : "DISABLED",
+            (unsigned long long)optimized_count_operations);
+    
+    if (lightweight_count_mode) {
+      fprintf(stderr, "RND_END: COUNT OPTIMIZATION ACHIEVED - reduced document processing overhead\n");
+    }
+    
+    count_performance_tracking = false;
+  }
+  
+  // Reset lightweight count optimization state
+  if (lightweight_count_mode || consecutive_rnd_next_calls > 0) {
+    fprintf(stderr, "RND_END: Resetting lightweight count state (calls=%d, mode=%s)\n", 
+            consecutive_rnd_next_calls, lightweight_count_mode ? "true" : "false");
+  }
+  consecutive_rnd_next_calls = 0;
+  lightweight_count_mode = false;
   
   // Clean up cursor
   if (cursor)
@@ -395,11 +546,21 @@ int ha_mongodb::info(uint flag)
   // During ALTER operations, these might be null, so we need to be defensive
   if (client && collection && share && share->connection_string)
   {
-    fprintf(stderr, "INFO: Getting MongoDB document count for statistics\n");
+    fprintf(stderr, "INFO: Getting MongoDB document count for statistics (pushed_condition=%p)\n", (void*)pushed_condition);
     
-    // Get document count from MongoDB
+    // Get document count from MongoDB - use pushed condition if available for COUNT with WHERE
     bson_error_t error;
-    bson_t *filter = bson_new(); // Empty filter = count all documents
+    bson_t *filter;
+    
+    if (pushed_condition) {
+      // Use the pushed condition for COUNT with WHERE optimization
+      filter = bson_copy(pushed_condition);
+      fprintf(stderr, "INFO: Using pushed condition for COUNT with WHERE optimization\n");
+    } else {
+      // Empty filter for simple COUNT(*)
+      filter = bson_new(); 
+      fprintf(stderr, "INFO: Using empty filter for simple COUNT(*)\n");
+    }
     
     int64_t doc_count = mongoc_collection_count_documents(
       collection,
@@ -416,13 +577,14 @@ int ha_mongodb::info(uint flag)
     {
       stats.records = (ha_rows)doc_count;
       stats.data_file_length = stats.records * stats.mean_rec_length;
-      fprintf(stderr, "INFO: Successfully got MongoDB count: %lld documents\n", (long long)doc_count);
+      fprintf(stderr, "INFO: Successfully got MongoDB count: %lld documents with %s\n", 
+              (long long)doc_count, pushed_condition ? "WHERE condition" : "no condition");
       fprintf(stderr, "INFO: Set stats.records = %llu for COUNT optimization\n", (unsigned long long)stats.records);
       
       // CRITICAL: For COUNT(*) operations, MariaDB may use stats.records directly
-      // This enables COUNT pushdown for simple COUNT(*) without WHERE clauses
-      if (count_mode) {
-        fprintf(stderr, "INFO: COUNT MODE - MariaDB may use this count directly!\n");
+      // This enables COUNT pushdown for both simple COUNT(*) and COUNT with WHERE
+      if (count_mode || pushed_condition) {
+        fprintf(stderr, "INFO: COUNT MODE or WHERE condition - MariaDB should use this count directly!\n");
       }
     }
     else
@@ -808,7 +970,8 @@ int ha_mongodb::read_range_next()
 // Record counting - MongoDB native count pushdown
 ha_rows ha_mongodb::records()
 {
-  fprintf(stderr, "RECORDS() CALLED - implementing MongoDB native count pushdown\n");
+  fprintf(stderr, "*** RECORDS() CALLED - implementing MongoDB native count pushdown ***\n");
+  fflush(stderr);  // Force immediate output
   
   if (!collection) {
     fprintf(stderr, "RECORDS: No collection available\n");

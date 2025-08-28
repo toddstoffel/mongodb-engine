@@ -25,6 +25,10 @@
 #include <mongoc/mongoc.h>
 #include <bson/bson.h>
 
+// Standard C++ includes for Phase 3A enhancements
+#include <chrono>
+#include <cstdint>
+
 // Include forward declarations for MongoDB components
 #include "mongodb_schema.h"
 
@@ -147,6 +151,16 @@ class ha_mongodb final : public handler
   // COUNT optimization state
   ha_rows mongo_count_result;   // Result from MongoDB count operation
   ha_rows mongo_count_returned; // How many count results we've returned to MariaDB
+  
+  // Lightweight COUNT optimization for WHERE clauses
+  int consecutive_rnd_next_calls; // Track consecutive rnd_next() calls for COUNT detection
+  bool lightweight_count_mode;    // Enable lightweight processing for COUNT operations
+  
+  // PHASE 3A: COUNT Performance Tracking
+  std::chrono::steady_clock::time_point count_start_time;  // Track COUNT operation timing
+  uint64_t documents_scanned;     // Track documents processed during operation
+  uint64_t optimized_count_operations; // Track how many COUNT operations were optimized
+  bool count_performance_tracking; // Enable performance metrics collection
   
   // Query and schema management
   MongoQueryTranslator *translator;
